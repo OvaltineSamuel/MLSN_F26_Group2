@@ -1,0 +1,11 @@
+# Normalize line endings: store LF in the repo, check out native locally.
+* text=auto eol=lf
+
+# Treat notebooks as text but don't munge them in merges.
+*.ipynb text eol=lf
+
+# Binary assets
+*.xlsx binary
+*.png binary
+*.pdf binary
+*.joblib binary

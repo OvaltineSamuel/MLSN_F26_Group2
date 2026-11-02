@@ -1,0 +1,20 @@
+# Core scientific stack (Tier 0 data cleaning + Tier 1 baselines)
+numpy>=1.24
+pandas>=2.0
+scikit-learn>=1.3
+scipy>=1.10
+openpyxl>=3.1          # read the .xlsx supplementary table
+matplotlib>=3.7
+seaborn>=0.12
+joblib>=1.3
+
+# Gradient-boosted-tree baselines (Tier 1).
+# NOTE: on very new Python versions some of these may not yet ship wheels.
+# The modelling notebook imports them optionally and skips any that are missing.
+lightgbm>=4.0
+xgboost>=2.0
+catboost>=1.2
+
+# Notebook runtime
+jupyter>=1.0
+ipykernel>=6.25

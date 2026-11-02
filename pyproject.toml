@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crispr-deephf"
+version = "0.1.0"
+description = "MLSN Group 2 — CRISPR-Cas9 guide-RNA indel efficiency prediction (DeepHF)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scikit-learn>=1.3",
+    "scipy>=1.10",
+    "openpyxl>=3.1",
+    "matplotlib>=3.7",
+    "seaborn>=0.12",
+    "joblib>=1.3",
+]
+
+[project.optional-dependencies]
+# Tier-1 gradient-boosting baselines (install if your Python has wheels).
+boosters = ["lightgbm>=4.0", "xgboost>=2.0", "catboost>=1.2"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Optional editable install so `import crispr_deephf` works without sys.path:
+#   pip install -e .
