@@ -176,8 +176,11 @@ class Standardizer:
 
   def fit(self, x):
     self.mean = x.mean(axis=0)
-    self.std = x.std(axis=0)
+    self.std = x.std(axis=0) if x.std(axis=0) != 0 else 1
     return self
+
+#when training we will fit the standardizer on glob
+#we will call transform on train, validate and test data
 
   def transform(self, x):
     return ((x - self.mean) / self.std).astype(np.float32)
