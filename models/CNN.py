@@ -1,9 +1,8 @@
 import Bio_Features as bf
-import numpy as np
 import torch
 from dataclasses import dataclass
 import torch.nn as nn
-import scipy
+\
 
 @dataclass
 class ModelConfig:
