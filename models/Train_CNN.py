@@ -76,4 +76,28 @@ def train(
         
         mean_rho = float(np.mean(val_spearman))
         
+        sched.step(mean_rho)
         
+        rho_str = ", ".join(f"{r:.4f}" for r in val_spearman)
+        
+        print(
+            f"Epoch {epoch:03d} | "
+            f"Train Loss: {running/seen:.4f} | "
+            f"Val Loss: {val_loss:.4f} | "
+            f"Val Spearman: {mean_rho:.4f} ({rho_str})"
+        )
+        
+        if mean_rho > best:
+            best, stale = mean_rho, 0
+            torch.save(model.state_dict(), checkpoint_path)
+            print(f"New best model saved with mean Spearman: {best:.4f}")
+        else:
+            stale += 1
+            print(f"No improvement. Stale count: {stale}/{patience}")
+            if stale >= patience:
+                print(f"Early stopping triggered at epoch {epoch}. Best mean Spearman: {best:.4f}")
+                break
+
+    model.load_state_dict(torch.load(checkpoint_path))
+    return model
+
