@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from scipy.stats import spearmanr
+import pandas as pd
 
 
 def spearman_per_target(y_true: np.ndarray, y_pred: np.ndarray) -> list[float]:
@@ -101,3 +102,45 @@ def train(
     model.load_state_dict(torch.load(checkpoint_path))
     return model
 
+#------------------------------------------------------------------------------------------------------
+#------------------------Full Data Pipeline------------------------------------------------
+#------------------------------------------------------------------------------------------------------
+
+def load_data(path: str, seq_col: str) -> pd.DataFrame:
+    df = pd.read_excel(path)
+    return df
+
+def one_hot_encode_sequences(seqs: list[str]) -> np.ndarray:
+    """Convert a list of DNA sequences into one-hot encoded format."""
+    mapping = {'A': 0, 'C': 1, 'G': 2, 'T': 3}
+    one_hot = np.zeros((len(seqs), 4, bf.SEQ_LEN), dtype=np.float32)
+    
+    for i, seq in enumerate(seqs):
+        assert len(seq) == bf.SEQ_LEN, f"Sequence length must be {bf.SEQ_LEN}, but got {len(seq)}"
+        for j, nucleotide in enumerate(seq):
+            if nucleotide in mapping:
+                one_hot[i, mapping[nucleotide], j] = 1.0
+    return one_hot
+
+def build_loaders(
+    df: pd.DataFrame,
+    seq_col: str,
+    cfg: cnn.ModelConfig,
+    batch_size: int,
+    seed: int,
+    cache_path: str | None
+):
+    seqs = df[seq_col].astype(str).tolist()
+    
+    X = one_hot_encode_sequences(seqs)
+    
+    Y = df[bf.TARGET_COLUMNS].to_numpy(dtype=np.float32)
+    
+    if Y.max() > 1.5:
+        Y = Y/100.0
+    B = bf.bio_matrix(seqs, cache_path=cache_path)
+    splits = {}
+    for key, target_col in zip(["WT", "HF1", "eSp"], bf.TARGET_COLUMNS):
+        s = df[f"{key}_split"].to_numpy()
+        
+        
