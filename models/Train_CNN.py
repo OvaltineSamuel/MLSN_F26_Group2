@@ -23,7 +23,7 @@ def evaluate_model(model: nn.Module, loader: torch.utils.data.DataLoader, device
         xb, bb, yb = xb.to(device), bb.to(device), yb.to(device)
     
         out = model(xb, bb if model.cfg.use_bio else None)
-        
+        total_loss += nn.functional.mse_loss(out, yb, reduction = "sum").item()
         n += yb.numel()
         
         preds.append(out.cpu().numpy())
