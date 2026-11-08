@@ -174,7 +174,7 @@ class Standardizer:
     self.mean = None
     self.std = None
 
-  def fit(self, x):
+  def fit(self, x: np.ndarray) -> "Standardizer":
     self.mean = x.mean(axis=0)
     self.std = x.std(axis=0) if x.std(axis=0) != 0 else 1
     return self
@@ -182,5 +182,5 @@ class Standardizer:
 #when training we will fit the standardizer on glob
 #we will call transform on train, validate and test data
 
-  def transform(self, x):
+  def transform(self, x: np.ndarray) -> np.ndarray:
     return ((x - self.mean) / self.std).astype(np.float32)

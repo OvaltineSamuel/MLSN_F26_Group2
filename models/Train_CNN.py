@@ -5,6 +5,7 @@ import torch.nn as nn
 import numpy as np
 from scipy.stats import spearmanr
 import pandas as pd
+import argparse
 
 
 def spearman_per_target(y_true: np.ndarray, y_pred: np.ndarray) -> list[float]:
@@ -107,7 +108,7 @@ def train(
 #------------------------------------------------------------------------------------------------------
 
 def load_data(path: str, seq_col: str) -> pd.DataFrame:
-    df = pd.read_excel(path)
+    df = pd.read_csv(path)
     return df
 
 def one_hot_encode_sequences(seqs: list[str]) -> np.ndarray:
@@ -128,8 +129,10 @@ def build_loaders(
     cfg: cnn.ModelConfig,
     batch_size: int,
     seed: int,
-    cache_path: str | None
+    cache_path: str | None,
+    Cas9: str = "WT" #different CNNs must be made for each Cas9 variant
 ):
+    
     seqs = df[seq_col].astype(str).tolist()
     
     X = one_hot_encode_sequences(seqs)
@@ -139,8 +142,82 @@ def build_loaders(
     if Y.max() > 1.5:
         Y = Y/100.0
     B = bf.bio_matrix(seqs, cache_path=cache_path)
-    splits = {}
-    for key, target_col in zip(["WT", "HF1", "eSp"], bf.TARGET_COLUMNS):
-        s = df[f"{key}_split"].to_numpy()
-        
-        
+    
+    dfs = {key: {name: g for name, g in df.groupby(f"{key}_split")}
+    for key in ["WT", "eSp", "HF1"]}
+    # use dfs[type][split] to access the dataframe for a specific type and split
+    
+    train_WT = dfs[Cas9]["train"]
+    
+    scaler = bf.Standardizer().fit(B[train_WT[seq_col].to_numpy()])
+    
+    Bs = scaler.transform(B)
+    
+    def make(split: str, shuffle: bool = True):
+        ds = TensorDataset(
+            torch.from_numpy(X[dfs[Cas9][split].index]),
+            torch.from_numpy(Bs[dfs[Cas9][split].index]),
+            torch.from_numpy(Y[dfs[Cas9][split].index])
+        )
+        return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, drop_last=False)
+    
+    print(f"Train size: {len(dfs[Cas9]['train'])}, Val size: {len(dfs[Cas9]['val'])}, Test size: {len(dfs[Cas9]['test'])}")
+    
+    return make("train"), make("val", shuffle=False), make("test", shuffle=False), scaler
+
+def main() -> None:
+    
+    p = argparse.ArgumentParser(description=__doc__)
+    
+    p.add_argument("data", help="CSV/XLSX with a 21-mer column and three efficiency columns")
+    p.add_argument("--seq_col", default="21mer", help="Column name for the 21-mer sequences")
+    p.add_argument("--batch_size", type=int, default=256)
+    p.add_argument("--epochs", type=int, default=60)
+    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--weight_decay", type=float, default=1e-4)
+    p.add_argument("--patience", type=int, default=10)
+    p.add_argument("--bio-cache", default="bio_features.npy")
+    p.add_argument("--no-bio", action="store_true", help="Disable bio features, ablation sequence only")
+    p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--seed", type=int, default=42)
+    args = p.parse_args()
+    
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    
+    df = load_dataframe(args.data, args.seq_col)
+    print(f"Loaded {len(df)} sequences from {args.data}")
+    
+    cfg = cnn.ModelConfig(use_bio=not args.no_bio)
+    train_loader, val_loader, test_loader, scaler = build_loaders(
+        df, args.seq_col, cfg, args.batch_size, args.seed, cache_path=args.bio_cache
+    )
+    
+    model = cnn.GuideCNN(cfg)
+    
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model has {n_params} trainable parameters. Bio branch: {'off' if args.no_bio else 'on'}")
+    
+    model = train(
+        model,
+        train_loader,
+        val_loader,
+        epochs=args.epochs,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        patience=args.patience,
+        device=args.device,
+        checkpoint_path=f"best_model{'_nobio' if args.no_bio else ''}.pt"
+    )
+    
+    _, test_spearman = evaluate_model(model, test_loader, args.device)
+    
+    print("held-out test Spearman correlations:", ", ".join(f"{r:.4f}" for r in test_spearman))
+    
+    print(f"{'mean':20s}{np.mean(test_spearman):.4f}")
+if __name__ == "__main__":
+    main()
+    
+
+    
+    
