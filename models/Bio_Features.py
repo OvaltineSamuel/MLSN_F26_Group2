@@ -11,7 +11,13 @@ SPACER_LEN = 20
 
 SCAFFOLD = "GTTTTAGAGCTAGAAATAGCAAGTTAAAATAAGGCTAGTCCGTTATCAACTTGAAAAAGTGGCACCGAGTCGGTGCTTTTT"
 
-TARGET_COLUMNS = ["wt_efficiency", "esp_efficiency", "hf_efficiency"]
+TARGET_COLUMNS = ["WT_Efficiency", "eSpCas9_Efficiency", "SpCas9_HF1_Efficiency"]
+
+TARGET_BY_CAS9 = {
+    "WT":  "WT_Efficiency",
+    "eSp": "eSpCas9_Efficiency",
+    "HF1": "SpCas9_HF1_Efficiency",
+}
 
 SCAFFOLD_REF = RNA.fold(SCAFFOLD.replace("T", "U"))[0]
 
@@ -147,6 +153,10 @@ def compute_bio_features(seq21:str) -> tuple[np.ndarray, np.ndarray]:
 def bio_matrix(seqs: list[str], cache_path: str| None = None) -> tuple[np.ndarray, np.ndarray]:
   """ (N, len(GLOBAL_FEATURE_NAMES)), cache the biofeature results"""
   if cache_path:
+    # np.savez_compressed silently appends ".npz"; normalise so save and load agree
+    cache_path = str(cache_path)
+    if not cache_path.endswith(".npz"):
+      cache_path += ".npz"
 
     try:
       cached = np.load(cache_path)
@@ -176,7 +186,8 @@ class Standardizer:
 
   def fit(self, x: np.ndarray) -> "Standardizer":
     self.mean = x.mean(axis=0)
-    self.std = x.std(axis=0) if x.std(axis=0) != 0 else 1
+    std = x.std(axis=0)
+    self.std = np.where(std == 0, 1.0, std)
     return self
 
 #when training we will fit the standardizer on glob

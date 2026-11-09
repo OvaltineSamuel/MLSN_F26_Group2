@@ -26,7 +26,12 @@ dependencies:
   - xgboost>=2.0
   - jupyter>=1.0
   - ipykernel>=6.25
+  # deep-learning stack: torch from conda-forge (NOT pip) so it shares conda's single OpenMP runtime
+  - pytorch>=2.1
+  - biopython>=1.82
+  - optuna>=3.5
   - pip
   - pip:
       # catboost is distributed most reliably via pip
       - catboost>=1.2
+      - ViennaRNA

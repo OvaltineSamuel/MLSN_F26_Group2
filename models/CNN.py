@@ -13,7 +13,7 @@ class ModelConfig:
   hidden_dims: tuple[int, ...] = (256, 128)
   dropout: float = 0.3
   n_bio_features: int = len(bf.GLOBAL_FEATURE_NAMES) + len(bf.POSITIONAL_CHANNEL_NAMES) * bf.SEQ_LEN
-  n_targets: int = len(bf.TARGET_COLUMNS)
+  n_targets: int = 1 # head must have one output, because split isn't constant across cas9 variants, so multi-output will cause a data leak
   use_bio: bool = True
   pam_proximal_skip: int = 4  # raw one-hot of the last N positions, 0 to disable
   
