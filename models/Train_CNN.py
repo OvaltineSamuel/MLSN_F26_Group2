@@ -49,6 +49,7 @@ def train(
     patience: int = 10,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     checkpoint_path: str = "best_model.pt",
+    history = None, 
 ) -> nn.Module:
     model.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -79,6 +80,16 @@ def train(
             seen += len(yb)
             
         val_loss, val_spearman = evaluate_model(model, val_loader, device)
+      
+        if history is not None:
+            history.append({
+                "epoch": epoch,
+                "train_mse": running / seen,
+                "val_mse": val_loss,
+                "val_spearman_wt": val_spearman[0],
+                "val_spearman_esp": val_spearman[1],
+                "val_spearman_hf1": val_spearman[2],
+            })
         
         mean_rho = float(np.mean(val_spearman))
         
