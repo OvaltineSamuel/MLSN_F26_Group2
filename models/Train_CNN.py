@@ -49,7 +49,7 @@ def train(
     patience: int = 10,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     checkpoint_path: str = "best_model.pt",
-    history = None, 
+    history = None , 
 ) -> nn.Module:
     model.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -254,7 +254,8 @@ def main() -> None:
     
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model has {n_params} trainable parameters. Bio branch: {'off' if args.no_bio else 'on'}")
-    
+
+    history = []
     model = train(
         model,
         train_loader,
@@ -264,8 +265,10 @@ def main() -> None:
         weight_decay=args.weight_decay,
         patience=args.patience,
         device=args.device,
-        checkpoint_path=f"best_model{'_nobio' if args.no_bio else ''}.pt"
+        checkpoint_path=f"best_model{'_nobio' if args.no_bio else ''}.pt",
+        history=history,
     )
+    pd.DataFrame(history).to_csv("history.csv", index=False)
     
     _, test_spearman = evaluate_model(model, test_loader, args.device)
     
