@@ -150,6 +150,7 @@ def build_splits(
     seq_col: str = "21mer",
     bio: bool = True,
     cache_path: Path | str | None = None,
+    allow_missing: bool = False,
 ) -> tuple[dict[str, SplitTensors], Standardizer | None]:
     """Turn a cleaned dataframe into ``{"train"/"val"/"test": SplitTensors}``.
 
@@ -159,11 +160,22 @@ def build_splits(
 
     With ``bio=False`` the ``bio`` arrays are zero-width ``(N, 0)`` and the
     returned standardizer is ``None``, so sequence-only models need no branch.
-    NaN targets (guides not measured for an enzyme, e.g. under ``shared_split``) are zero-filled in ``y`` and marked 0 in
-    ``mask``. Per-enzyme callers should pass ``data.filter_for_target`` output so nothing is dropped silently.
+    Unmeasured (NaN) targets are zero-filled in ``y`` and marked 0 in ``mask``.
+
+    Parameters
+    ----------
+    df : cleaned dataframe carrying *split_col*, *seq_col* and the targets.
+    target_cols : target columns, in the column order of ``y`` and ``mask``.
+    split_col : frozen split-label column to read.
+    seq_col : 21-mer column.
+    bio : compute and standardize bio features (``False`` gives ``(N, 0)`` and ``None``).
+    cache_path : optional bio-feature cache file.
+    allow_missing : permit NaN targets, for the multi-task table where the mask
+        handles them. Default ``False`` fails loudly; single-target runs should
+        instead pass a frame already filtered by ``data.filter_for_target``.
     """
     target_cols = list(target_cols)
-    check_integrity(df, seq_col, split_col, target_cols, allow_missing=True)
+    check_integrity(df, seq_col, split_col, target_cols, allow_missing=allow_missing)
 
     seqs = df[seq_col].astype(str).tolist()
     x = one_hot_encode(seqs)

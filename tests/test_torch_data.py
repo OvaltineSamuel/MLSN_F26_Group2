@@ -81,7 +81,7 @@ def test_check_integrity_rejects_nan_target_unless_multitask(synthetic_df):
 def test_mask_marks_missing_targets(synthetic_df):
     df = data.add_shared_split(synthetic_df)
     splits, _ = torch_data.build_splits(
-        df, target_cols=config.TARGET_COLS, split_col="shared_split", bio=False
+        df, target_cols=config.TARGET_COLS, split_col="shared_split", bio=False, allow_missing=True
     )
     tr = splits["train"]
     assert tr.mask.shape == tr.y.shape
@@ -93,7 +93,7 @@ def test_mask_marks_missing_targets(synthetic_df):
 def test_mask_matches_source_and_unmeasured_y_is_zero(synthetic_df):
     df = data.add_shared_split(synthetic_df)
     splits, _ = torch_data.build_splits(
-        df, target_cols=config.TARGET_COLS, split_col="shared_split", bio=False
+        df, target_cols=config.TARGET_COLS, split_col="shared_split", bio=False, allow_missing=True
     )
     by_id = df.set_index("gRNA_ID")
     for sp in splits.values():
@@ -107,7 +107,7 @@ def test_mask_matches_source_and_unmeasured_y_is_zero(synthetic_df):
 def test_split_sizes_follow_frozen_labels(synthetic_df):
     df = data.add_shared_split(synthetic_df)
     splits, scaler = torch_data.build_splits(
-        df, target_cols=["WT_Efficiency"], split_col="shared_split", bio=False
+        df, target_cols=["WT_Efficiency"], split_col="shared_split", bio=False, allow_missing=True
     )
     for name in ("train", "val", "test"):
         assert splits[name].x.shape[0] == int((df["shared_split"] == name).sum())
@@ -120,7 +120,7 @@ def test_standardizer_fit_on_train_only(synthetic_df, monkeypatch):
     monkeypatch.setattr(torch_data, "bio_matrix", _fake_bio_matrix)
     df = data.add_shared_split(synthetic_df)
     splits, scaler = torch_data.build_splits(
-        df, target_cols=["WT_Efficiency"], split_col="shared_split", bio=True
+        df, target_cols=["WT_Efficiency"], split_col="shared_split", bio=True, allow_missing=True
     )
     glob, chans = _fake_bio_matrix(df["21mer"].tolist())
     raw = bio_features.flatten_bio(glob, chans)
@@ -139,7 +139,7 @@ def test_standardizer_fit_on_train_only(synthetic_df, monkeypatch):
 def test_loader_yields_x_bio_y_mask_in_order(synthetic_df):
     df = data.add_shared_split(synthetic_df)
     splits, _ = torch_data.build_splits(
-        df, target_cols=config.TARGET_COLS, split_col="shared_split", bio=False
+        df, target_cols=config.TARGET_COLS, split_col="shared_split", bio=False, allow_missing=True
     )
     loader = torch_data.make_loader(splits["train"], batch_size=32, shuffle=True, seed=1)
     x, bio, y, mask = next(iter(loader))
@@ -153,7 +153,7 @@ def test_loader_yields_x_bio_y_mask_in_order(synthetic_df):
 def test_loader_shuffle_is_seeded(synthetic_df):
     df = data.add_shared_split(synthetic_df)
     splits, _ = torch_data.build_splits(
-        df, target_cols=["WT_Efficiency"], split_col="shared_split", bio=False
+        df, target_cols=["WT_Efficiency"], split_col="shared_split", bio=False, allow_missing=True
     )
 
     def first(seed):
@@ -176,8 +176,17 @@ def test_real_bio_features_on_a_few_guides(synthetic_df, tmp_path):
         target_cols=config.TARGET_COLS,
         split_col="shared_split",
         bio=True,
+        allow_missing=True,
         cache_path=tmp_path / "bio.npz",
     )
     assert splits["train"].bio.shape == (8, bio_features.N_BIO_FEATURES)
     assert scaler is not None and scaler.mean.shape == (bio_features.N_BIO_FEATURES,)
     assert np.isfinite(splits["test"].bio).all()
+
+
+def test_build_splits_default_is_strict_about_missing_targets(synthetic_df):
+    df = data.add_shared_split(synthetic_df)  # WT column holds NaN on unmeasured guides
+    with pytest.raises(AssertionError, match="non-finite"):
+        torch_data.build_splits(
+            df, target_cols=["WT_Efficiency"], split_col="shared_split", bio=False
+        )
