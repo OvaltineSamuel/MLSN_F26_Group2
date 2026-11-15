@@ -7,6 +7,9 @@ Colab cleaning code. They encode the biological contract of the data (an
 
 from __future__ import annotations
 
+import os
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import numpy as np
@@ -16,13 +19,17 @@ from sklearn.model_selection import train_test_split
 from . import config
 
 __all__ = [
+    "add_shared_split",
     "add_split_labels",
     "clean_and_validate",
+    "ensure_raw_excel",
+    "filter_for_target",
     "find_raw_excel",
     "get_split_arrays",
     "load_clean",
     "load_raw",
     "make_variant_split_indices",
+    "split_counts",
     "summary_table",
     "variant_valid_mask",
 ]
@@ -50,6 +57,55 @@ def find_raw_excel(search_dirs: list[Path | str]) -> Path:
     searched = "\n  ".join(str(c) for c in candidates)
     raise FileNotFoundError(
         f"Could not find '{config.RAW_XLSX_NAME}'. Searched:\n  {searched}"
+    )
+
+
+def ensure_raw_excel(paths: config.Paths, *, allow_download: bool = True) -> Path:
+    """Return the raw ``.xlsx``, downloading it into ``paths.data_raw`` if needed.
+
+    Searches ``paths.data_raw`` and ``paths.root`` first. If absent and
+    *allow_download*, fetches :data:`config.RAW_XLSX_URL` to a ``.part`` file and
+    atomically renames it on success, so an interrupted download never leaves a
+    truncated ``.xlsx`` that a later run would treat as valid.
+
+    Parameters
+    ----------
+    paths:
+        Project paths from :func:`config.get_paths`.
+    allow_download:
+        If ``False``, never touch the network.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the file is absent and cannot be downloaded; the message explains
+        how to upload it manually.
+    """
+    try:
+        return find_raw_excel([paths.data_raw, paths.root])
+    except FileNotFoundError:
+        pass
+
+    dest = paths.data_raw / config.RAW_XLSX_NAME
+    reason = "downloading is disabled"
+    if allow_download:
+        part = dest.with_name(dest.name + ".part")
+        try:
+            paths.data_raw.mkdir(parents=True, exist_ok=True)
+            with urllib.request.urlopen(config.RAW_XLSX_URL, timeout=60) as resp,                     open(part, "wb") as fh:
+                while chunk := resp.read(1 << 20):
+                    fh.write(chunk)
+            os.replace(part, dest)
+            return dest
+        except (OSError, urllib.error.URLError) as exc:
+            reason = f"download failed ({exc})"
+        finally:
+            part.unlink(missing_ok=True)
+
+    raise FileNotFoundError(
+        f"Could not obtain '{config.RAW_XLSX_NAME}': {reason}. Upload it manually "
+        f"to '{paths.data_raw}' (or the project root), or download it from "
+        f"{config.RAW_XLSX_URL}."
     )
 
 
@@ -181,6 +237,40 @@ def add_split_labels(
             row_positions = valid_positions[local_idx]
             df.iloc[row_positions, df.columns.get_loc(split_col)] = name
     return df
+
+
+def add_shared_split(
+    df: pd.DataFrame, seed: int = config.RANDOM_SEED
+) -> pd.DataFrame:
+    """Add a ``shared_split`` column labelling *every* row train/val/test.
+
+    Unlike the per-enzyme ``<KEY>_split`` columns (which only label rows measured
+    for that enzyme), this is one partition over all rows, so a guide has the
+    same split for every enzyme -- required by the multi-task model. It reuses
+    :func:`make_variant_split_indices`, so the ratios live in one place.
+    """
+    df = df.copy()
+    labels = np.empty(len(df), dtype=object)
+    for name, idx in make_variant_split_indices(len(df), seed=seed).items():
+        labels[idx] = name
+    df[config.SHARED_SPLIT_COL] = labels
+    return df
+
+
+def split_counts(df: pd.DataFrame, split_col: str) -> dict[str, int]:
+    """Return ``{label: n_rows}`` for the non-null labels of *split_col*."""
+    return {str(k): int(v) for k, v in df[split_col].value_counts().items()}
+
+
+def filter_for_target(df: pd.DataFrame, target_col: str) -> pd.DataFrame:
+    """Keep rows measured for *target_col* that carry a split label for it.
+
+    This is the single place rows are dropped per enzyme, so a missing
+    measurement can never reach a model as if it were real. The index is reset.
+    """
+    split_col = f"{config.TARGET_KEYS[target_col]}_split"
+    keep = df[target_col].notna() & df[split_col].notna()
+    return df.loc[keep].reset_index(drop=True)
 
 
 def load_clean(path: Path | str) -> pd.DataFrame:

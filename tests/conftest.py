@@ -6,9 +6,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from crispr_deephf import config
+
 _N_ROWS = 400
 _NAN_FRACTION = 0.10
-_EFFICIENCY_COLUMNS = ("WT_Efficiency", "eSp_Efficiency", "HF1_Efficiency")
+_EFFICIENCY_COLUMNS = tuple(config.TARGET_COLS)
 
 
 @pytest.fixture
