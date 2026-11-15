@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import urllib.error
 from pathlib import Path
 
@@ -41,13 +42,15 @@ def test_shared_split_does_not_mutate_input_or_per_enzyme_columns(synthetic_df):
         assert out[col].equals(before[col])
 
 
-def test_filter_for_target_drops_unmeasured_rows(synthetic_df):
+@pytest.mark.parametrize("target_col", config.TARGET_COLS)
+def test_filter_for_target_drops_unmeasured_rows(synthetic_df, target_col):
     df = data.add_split_labels(synthetic_df)
-    out = data.filter_for_target(df, "WT_Efficiency")
-    assert out["WT_Efficiency"].notna().all()
-    assert len(out) == int(df["WT_Efficiency"].notna().sum())
+    out = data.filter_for_target(df, target_col)
+    split_col = f"{config.TARGET_KEYS[target_col]}_split"
+    assert out[target_col].notna().all()
+    assert len(out) == int(df[target_col].notna().sum())
     assert out.index.tolist() == list(range(len(out)))
-    assert out["WT_split"].isin(["train", "val", "test"]).all()
+    assert out[split_col].isin(["train", "val", "test"]).all()
 
 
 def test_filter_for_target_drops_rows_with_unset_split(synthetic_df):
@@ -113,3 +116,62 @@ def test_ensure_raw_excel_failed_download_leaves_no_file(tmp_path, monkeypatch):
         data.ensure_raw_excel(paths)
     assert not list(Path(paths.data_raw).glob("*.xlsx"))
     assert not list(Path(paths.data_raw).glob("*.part"))
+
+
+def test_add_shared_split_rejects_duplicate_sequences(synthetic_df):
+    df = synthetic_df.copy()
+    df.loc[1, "21mer"] = df.loc[0, "21mer"]
+    with pytest.raises(ValueError, match="duplicate"):
+        data.add_shared_split(df)
+
+
+def test_assert_unique_sequences_passes_on_unique_and_names_examples(synthetic_df):
+    data.assert_unique_sequences(synthetic_df)
+    df = synthetic_df.copy()
+    df.loc[1, "21mer"] = df.loc[0, "21mer"]
+    with pytest.raises(ValueError) as err:
+        data.assert_unique_sequences(df)
+    assert df.loc[0, "21mer"] in str(err.value)
+
+
+def _fake_urlopen(payload, *, fail_after=None):
+    class _Resp:
+        def __init__(self):
+            self._data = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, n=-1):
+            if fail_after is not None and len(self._data) < len(payload) - fail_after:
+                raise http.client.IncompleteRead(b"")
+            out, self._data = self._data[:n], self._data[n:]
+            return out
+
+    return lambda *a, **k: _Resp()
+
+
+def test_ensure_raw_excel_rejects_non_xlsx_payload(tmp_path, monkeypatch):
+    paths = config.get_paths(tmp_path)
+    monkeypatch.setattr(
+        data.urllib.request, "urlopen", _fake_urlopen(b"<html>captive portal</html>")
+    )
+    with pytest.raises(FileNotFoundError):
+        data.ensure_raw_excel(paths)
+    assert not list(paths.data_raw.glob("*.xlsx"))
+    assert not list(paths.data_raw.glob("*.part"))
+
+
+def test_ensure_raw_excel_truncated_download_is_handled(tmp_path, monkeypatch):
+    paths = config.get_paths(tmp_path)
+
+    def truncated(*a, **k):
+        raise http.client.IncompleteRead(b"PK")
+
+    monkeypatch.setattr(data.urllib.request, "urlopen", truncated)
+    with pytest.raises(FileNotFoundError):
+        data.ensure_raw_excel(paths)
+    assert not list(paths.data_raw.glob("*.xlsx"))

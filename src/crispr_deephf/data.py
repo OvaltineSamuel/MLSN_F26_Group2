@@ -7,8 +7,8 @@ Colab cleaning code. They encode the biological contract of the data (an
 
 from __future__ import annotations
 
+import http.client
 import os
-import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -21,6 +21,7 @@ from . import config
 __all__ = [
     "add_shared_split",
     "add_split_labels",
+    "assert_unique_sequences",
     "clean_and_validate",
     "ensure_raw_excel",
     "filter_for_target",
@@ -88,25 +89,46 @@ def ensure_raw_excel(paths: config.Paths, *, allow_download: bool = True) -> Pat
 
     dest = paths.data_raw / config.RAW_XLSX_NAME
     reason = "downloading is disabled"
+    cause: Exception | None = None
     if allow_download:
-        part = dest.with_name(dest.name + ".part")
         try:
-            paths.data_raw.mkdir(parents=True, exist_ok=True)
-            with urllib.request.urlopen(config.RAW_XLSX_URL, timeout=60) as resp,                     open(part, "wb") as fh:
-                while chunk := resp.read(1 << 20):
-                    fh.write(chunk)
-            os.replace(part, dest)
+            _download_xlsx(config.RAW_XLSX_URL, dest)
             return dest
-        except (OSError, urllib.error.URLError) as exc:
-            reason = f"download failed ({exc})"
-        finally:
-            part.unlink(missing_ok=True)
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            reason = f"download failed ({exc!r})"
+            cause = exc
 
     raise FileNotFoundError(
         f"Could not obtain '{config.RAW_XLSX_NAME}': {reason}. Upload it manually "
         f"to '{paths.data_raw}' (or the project root), or download it from "
         f"{config.RAW_XLSX_URL}."
-    )
+    ) from cause
+
+
+def _download_xlsx(url: str, dest: Path) -> None:
+    """Download *url* to *dest* atomically, rejecting non-``.xlsx`` payloads.
+
+    The bytes go to ``<dest>.part`` and are renamed only after the zip magic
+    bytes (``PK``) check passes, so neither a truncated transfer nor an HTML
+    error page served with HTTP 200 is ever installed as the dataset.
+
+    Raises
+    ------
+    ValueError
+        If the payload is not a zip container (i.e. not an ``.xlsx``).
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    try:
+        with urllib.request.urlopen(url, timeout=60) as resp, open(part, "wb") as fh:
+            while chunk := resp.read(1 << 20):
+                fh.write(chunk)
+        with open(part, "rb") as fh:
+            if fh.read(2) != b"PK":
+                raise ValueError("response is not an .xlsx (missing 'PK' zip header)")
+        os.replace(part, dest)
+    finally:
+        part.unlink(missing_ok=True)
 
 
 def load_raw(filepath: Path | str) -> pd.DataFrame:
@@ -223,6 +245,11 @@ def add_split_labels(
     This freezes the split into the cleaned dataset itself, so the modelling
     notebook simply *reads* the labels rather than re-deriving them -- the two
     notebooks can never disagree about which guide is in which split.
+
+    Precondition: ``21mer`` values are unique (true of the real dataset, which
+    has no duplicates). The split is index-based and this function does not
+    check it, so duplicates would leak across splits; call
+    :func:`assert_unique_sequences` first on untrusted input.
     """
     df = df.copy()
     for target_col, key in config.TARGET_KEYS.items():
@@ -239,6 +266,28 @@ def add_split_labels(
     return df
 
 
+def assert_unique_sequences(df: pd.DataFrame, seq_col: str = "21mer") -> None:
+    """Raise if *seq_col* holds duplicate sequences.
+
+    The splits are index-based, so a duplicated sequence could land in both
+    train and test and silently inflate every reported metric. Nothing upstream
+    deduplicates, so splitting code must call this first.
+
+    Raises
+    ------
+    ValueError
+        Naming the number of duplicated rows and a few example sequences.
+    """
+    dup = df[seq_col].duplicated(keep=False)
+    if dup.any():
+        examples = ", ".join(df.loc[dup, seq_col].drop_duplicates().head(3))
+        raise ValueError(
+            f"{int(df[seq_col].duplicated().sum())} duplicate '{seq_col}' "
+            f"sequence(s) would leak across splits (e.g. {examples}). "
+            "Deduplicate before splitting."
+        )
+
+
 def add_shared_split(
     df: pd.DataFrame, seed: int = config.RANDOM_SEED
 ) -> pd.DataFrame:
@@ -248,7 +297,14 @@ def add_shared_split(
     for that enzyme), this is one partition over all rows, so a guide has the
     same split for every enzyme -- required by the multi-task model. It reuses
     :func:`make_variant_split_indices`, so the ratios live in one place.
+
+    Raises
+    ------
+    ValueError
+        If ``21mer`` is not unique (see :func:`assert_unique_sequences`); the
+        split is index-based and duplicates would leak across splits.
     """
+    assert_unique_sequences(df)
     df = df.copy()
     labels = np.empty(len(df), dtype=object)
     for name, idx in make_variant_split_indices(len(df), seed=seed).items():
