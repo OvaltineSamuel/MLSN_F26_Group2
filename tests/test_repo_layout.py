@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,3 +22,11 @@ def test_legacy_notebooks_preserved():
 def test_teammate_sources_untouched():
     for name in ("Bio_Features.py", "CNN.py", "Train_CNN.py", "Experiments.py"):
         assert (ROOT / "models" / name).exists()
+
+
+def test_catboost_logs_not_tracked():
+    out = subprocess.run(
+        ["git", "ls-files", "notebooks/catboost_info"],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    ).stdout
+    assert out.strip() == ""
