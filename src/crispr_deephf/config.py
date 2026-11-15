@@ -19,6 +19,12 @@ from pathlib import Path
 #: File name of the DeepHF supplementary table (Wang et al., 2019).
 RAW_XLSX_NAME = "41467_2019_12281_MOESM3_ESM.xlsx"
 
+#: Nature Communications supplementary data URL for ``RAW_XLSX_NAME``.
+RAW_XLSX_URL = (
+    "https://static-content.springer.com/esm/art%3A10.1038%2Fs41467-019-12281-8"
+    "/MediaObjects/41467_2019_12281_MOESM3_ESM.xlsx"
+)
+
 #: Header row to use when reading the Excel sheet (row 0 is a title banner).
 RAW_HEADER_ROW = 1
 
@@ -72,6 +78,9 @@ RANDOM_SEED = 42
 TEST_SIZE = 0.15
 VAL_SIZE_OF_REMAINDER = 0.10
 
+#: Column holding the shared train/val/test split label across all targets.
+SHARED_SPLIT_COL = "shared_split"
+
 #: Cleaned dataset file names produced by the data cleaning notebook.
 CLEAN_ALL_CSV = "deephf_clean_all.csv"          # all rows + per-variant split labels
 CLEAN_MULTITASK_CSV = "deephf_clean_multitask.csv"  # rows valid for all 3 variants
@@ -79,6 +88,59 @@ RAW_BACKUP_CSV = "deephf_raw_seq.csv"
 
 #: Nucleotide -> integer token mapping used by every encoder.
 NT_TO_INT = {"A": 0, "C": 1, "G": 2, "T": 3}
+
+# --------------------------------------------------------------------------- #
+# Paper reference metrics (Wang et al., 2019)
+# --------------------------------------------------------------------------- #
+#: Paper's test-set Spearman rho per model, keyed by short target key (see
+#: ``TARGET_KEYS``). Exact values from the article text, p.4-5 (Fig. 5c-e).
+PAPER_SPEARMAN: dict[str, dict[str, float]] = {
+    "XGBoost": {"WT": 0.8454, "eSp": 0.8310, "HF1": 0.8184},
+    "MLP": {"WT": 0.8416, "eSp": 0.8457, "HF1": 0.8440},
+    "CNN": {"WT": 0.8455, "eSp": 0.8313, "HF1": 0.8343},
+    "RNN": {"WT": 0.8555, "eSp": 0.8491, "HF1": 0.8512},
+    "RNN+biofeature": {"WT": 0.8670, "eSp": 0.8624, "HF1": 0.8603},
+}
+
+#: Linear and Ridge appear only as bars in Fig. 5c-e, so these are figure-read
+#: APPROXIMATIONS (about +/-0.01). Never mix them with ``PAPER_SPEARMAN``.
+PAPER_SPEARMAN_APPROX: dict[str, dict[str, float]] = {
+    "Linear": {"WT": 0.78, "eSp": 0.77, "HF1": 0.75},
+    "Ridge": {"WT": 0.78, "eSp": 0.77, "HF1": 0.76},
+}
+
+#: Comparability caveat to show wherever our numbers are set against the paper.
+PAPER_CAVEAT = (
+    "The paper reports mean ± s.d. over tenfold shuffled validation (n=10); "
+    "we report a single fixed split (seed 42) averaged over 3 model-init seeds, "
+    "so the two are not a like-for-like significance test."
+)
+
+#: Guide counts in the paper's per-target datasets (article text).
+PAPER_N_GUIDES = {"WT": 55604, "eSp": 58167, "HF1": 56888}
+
+# --------------------------------------------------------------------------- #
+# Run modes (used by the notebook's quick/full switch)
+# --------------------------------------------------------------------------- #
+#: Training budget per run mode. ``quick`` checks the pipeline end to end;
+#: ``full`` is the reported configuration.
+RUN_MODES: dict[str, dict] = {
+    "quick": {"epochs": 3, "n_seeds": 1, "patience": 2, "batch_size": 256},
+    "full": {"epochs": 60, "n_seeds": 3, "patience": 10, "batch_size": 256},
+}
+
+
+def get_mode(name: str) -> dict:
+    """Return a copy of the run-mode settings for *name*.
+
+    Raises
+    ------
+    KeyError
+        If *name* is not one of the ``RUN_MODES`` keys.
+    """
+    if name not in RUN_MODES:
+        raise KeyError(f"unknown run mode {name!r}; valid modes: {sorted(RUN_MODES)}")
+    return dict(RUN_MODES[name])
 
 
 @dataclass(frozen=True)
@@ -88,6 +150,7 @@ class Paths:
     root: Path
     data_raw: Path
     data_processed: Path
+    cache: Path
     models: Path
     results: Path
     figures: Path
@@ -96,6 +159,7 @@ class Paths:
         for p in (
             self.data_raw,
             self.data_processed,
+            self.cache,
             self.models,
             self.results,
             self.figures,
@@ -133,6 +197,7 @@ def get_paths(root: Path | str | None = None) -> Paths:
         root=root_path,
         data_raw=root_path / "data" / "raw",
         data_processed=root_path / "data" / "processed",
+        cache=root_path / "data" / "cache",
         models=root_path / "models",
         results=root_path / "results",
         figures=root_path / "results" / "figures",
