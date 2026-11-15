@@ -11,14 +11,13 @@ Two representations are produced from the 21-mer (20-nt spacer + 1st nt of PAM):
 from __future__ import annotations
 
 import time
-from typing import Iterable, Sequence
+from collections.abc import Iterable, Sequence
 
 import numpy as np
-import pandas as pd
 
 from . import config
 
-__all__ = ["encode_sequences", "extract_crispr_features", "N_FEATURES"]
+__all__ = ["N_FEATURES", "encode_sequences", "extract_crispr_features"]
 
 #: Number of tabular features produced by :func:`extract_crispr_features`.
 #  84 positional one-hot + 320 positional dinucleotide + 8 global counts/freqs

@@ -23,6 +23,8 @@ from __future__ import annotations
 
 __version__ = "0.1.0"
 
+# Only torch-free modules are imported eagerly so `import crispr_deephf` works with just the
+# [dev] extra (as in CI). Deep-learning modules are imported explicitly by callers.
 from . import config, data, features, models, plots
 
-__all__ = ["config", "data", "features", "models", "plots", "__version__"]
+__all__ = ["__version__", "config", "data", "features", "models", "plots"]

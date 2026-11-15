@@ -22,3 +22,7 @@ catboost>=1.2
 # Notebook runtime
 jupyter>=1.0
 ipykernel>=6.25
+
+# Test + lint tooling
+pytest>=8.0
+ruff>=0.6

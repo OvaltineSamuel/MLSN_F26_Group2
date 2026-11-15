@@ -8,6 +8,7 @@ models/*
 results/*
 !models/.gitkeep
 !models/*.py
+!models/README.md
 !results/.gitkeep
 # Re-include the figures folder (can't re-add a file inside an excluded dir)
 !results/figures/
@@ -52,3 +53,12 @@ Thumbs.db
 
 # ---- Claude Code local settings ----
 .claude/settings.local.json
+
+instagram_post/
+
+# ---- Training artifacts / catboost logs ----
+catboost_info/
+**/catboost_info/
+*.npz
+runs/
+*.pt

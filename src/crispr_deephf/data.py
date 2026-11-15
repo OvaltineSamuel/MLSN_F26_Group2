@@ -7,7 +7,6 @@ Colab cleaning code. They encode the biological contract of the data (an
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import numpy as np
@@ -17,15 +16,15 @@ from sklearn.model_selection import train_test_split
 from . import config
 
 __all__ = [
-    "find_raw_excel",
-    "load_raw",
+    "add_split_labels",
     "clean_and_validate",
+    "find_raw_excel",
+    "get_split_arrays",
+    "load_clean",
+    "load_raw",
+    "make_variant_split_indices",
     "summary_table",
     "variant_valid_mask",
-    "make_variant_split_indices",
-    "add_split_labels",
-    "load_clean",
-    "get_split_arrays",
 ]
 
 

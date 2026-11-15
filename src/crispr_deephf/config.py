@@ -10,7 +10,6 @@ directory the pipeline uses, creating them on first use.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -93,7 +92,7 @@ class Paths:
     results: Path
     figures: Path
 
-    def mkdirs(self) -> "Paths":
+    def mkdirs(self) -> Paths:
         for p in (
             self.data_raw,
             self.data_processed,

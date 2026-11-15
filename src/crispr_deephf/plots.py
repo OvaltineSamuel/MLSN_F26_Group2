@@ -7,21 +7,21 @@ returns the Figure so the caller can save it.
 
 from __future__ import annotations
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.stats import pearsonr, spearmanr
 
 from . import config
 
 __all__ = [
-    "set_style",
     "plot_efficiency_distributions",
+    "plot_feature_importance",
     "plot_model_comparison",
     "plot_pred_vs_actual",
-    "plot_feature_importance",
     "plot_residuals",
+    "set_style",
 ]
 
 

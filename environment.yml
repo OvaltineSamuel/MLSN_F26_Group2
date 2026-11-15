@@ -30,6 +30,8 @@ dependencies:
   - pytorch>=2.1
   - biopython>=1.82
   - optuna>=3.5
+  - pytest>=8.0
+  - ruff>=0.6
   - pip
   - pip:
       # catboost is distributed most reliably via pip

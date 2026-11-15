@@ -12,7 +12,7 @@ whole notebook. Ridge always works (scikit-learn is a hard dependency).
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 from scipy.stats import pearsonr, spearmanr
@@ -22,15 +22,15 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from . import config
 
 __all__ = [
+    "CATBOOST_AVAILABLE",
     "LIGHTGBM_AVAILABLE",
     "XGBOOST_AVAILABLE",
-    "CATBOOST_AVAILABLE",
-    "compute_metrics",
-    "train_ridge",
-    "train_lightgbm",
-    "train_xgboost",
-    "train_catboost",
     "available_trainers",
+    "compute_metrics",
+    "train_catboost",
+    "train_lightgbm",
+    "train_ridge",
+    "train_xgboost",
 ]
 
 # --------------------------------------------------------------------------- #
