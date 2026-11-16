@@ -7,13 +7,16 @@ returns the Figure so the caller can save it.
 
 from __future__ import annotations
 
+import textwrap
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from matplotlib.patches import Patch
 from scipy.stats import pearsonr, spearmanr
 
-from . import config
+from . import benchmark, config
 
 __all__ = [
     "plot_efficiency_distributions",
@@ -21,6 +24,9 @@ __all__ = [
     "plot_model_comparison",
     "plot_pred_vs_actual",
     "plot_residuals",
+    "plot_tier_progression",
+    "plot_training_curves",
+    "plot_vs_paper",
     "set_style",
 ]
 
@@ -135,4 +141,118 @@ def plot_residuals(
         ax.set_ylabel("Count")
         ax.grid(axis="y", linestyle="--", alpha=0.4)
     plt.tight_layout()
+    return fig
+
+
+# --------------------------------------------------------------------------- #
+# Benchmark / presentation figures
+# --------------------------------------------------------------------------- #
+_PAPER_GREY = "#7f7f7f"
+_SLIDE_FONT = 14
+
+
+def _caption(fig: plt.Figure) -> None:
+    """Print the paper-comparability caveat along the bottom of a figure."""
+    caption = "\n".join(textwrap.wrap(benchmark.format_caveat(), 110))
+    fig.text(0.5, 0.01, caption, ha="center", va="bottom", fontsize=10, style="italic")
+
+
+def plot_vs_paper(scoreboard_df: pd.DataFrame) -> plt.Figure:
+    """Grouped bars, ours vs paper, one panel per enzyme (models with a paper row only).
+
+    Our bar carries a +/- s.d. error bar only when a s.d. exists (multi-seed models).
+    Paper bars from the article text are solid grey; figure-read approximations are
+    hatched. The comparability caveat is the figure caption.
+    """
+    sb = scoreboard_df[scoreboard_df["Paper_source"] != ""]
+    fig, axes = plt.subplots(1, 3, figsize=(16, 6.5), sharey=True)
+    for ax, tgt in zip(axes, config.TARGET_COLS):
+        sub = sb[sb["Target"] == tgt].reset_index(drop=True)
+        x = np.arange(len(sub))
+        w = 0.38
+        for i, row in sub.iterrows():
+            err = None if pd.isna(row["Ours_sd"]) else row["Ours_sd"]
+            ax.bar(x[i] - w / 2, row["Ours_rho"], w, color=config.TARGET_COLORS[tgt],
+                   yerr=err, capsize=4, ecolor="black")
+            approx = row["Paper_source"] == "figure (approx)"
+            ax.bar(x[i] + w / 2, row["Paper_rho"], w, color="white" if approx else _PAPER_GREY,
+                   edgecolor=_PAPER_GREY, hatch="//" if approx else None)
+        ax.set_xticks(x)
+        ax.set_xticklabels(sub["Model"], rotation=30, ha="right", fontsize=_SLIDE_FONT - 2)
+        ax.set_title(config.TARGET_LABELS[tgt], fontsize=_SLIDE_FONT, fontweight="bold")
+        ax.set_ylim(0.6, 0.95)
+        ax.grid(axis="y", linestyle="--", alpha=0.5)
+    axes[0].set_ylabel("Test Spearman rho (axis starts at 0.60)", fontsize=_SLIDE_FONT)
+    fig.legend(
+        handles=[
+            Patch(facecolor="#bbbbbb", label="Ours (colour = enzyme; ± s.d., none if 1 seed)"),
+            Patch(facecolor=_PAPER_GREY, label="Paper (article text)"),
+            Patch(facecolor="white", edgecolor=_PAPER_GREY, hatch="//",
+                  label="Paper (figure, approx)"),
+        ],
+        loc="lower center", ncol=3, fontsize=11, frameon=False,
+        bbox_to_anchor=(0.5, 0.075),
+    )
+    fig.suptitle("Ours vs paper: test Spearman rho", fontsize=_SLIDE_FONT + 3,
+                 fontweight="bold")
+    fig.tight_layout(rect=(0, 0.14, 1, 0.95))
+    _caption(fig)
+    return fig
+
+
+def plot_training_curves(history_frame: pd.DataFrame) -> plt.Figure:
+    """Loss curves (left) and validation Spearman rho (right) for one training run.
+
+    ``history_frame`` has ``epoch, train_loss, val_loss, val_rho`` and optionally
+    ``val_rho_per_target`` (dict keyed by target column). Targets absent from a row's
+    dict (no measured validation entries) are left as gaps, never assumed present.
+    """
+    hist = pd.DataFrame(history_frame)
+    fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(14, 5))
+    ax_l.plot(hist["epoch"], hist["train_loss"], marker="o", color="#0072B2", label="Train")
+    ax_l.plot(hist["epoch"], hist["val_loss"], marker="s", color="#D55E00", label="Validation")
+    ax_l.set(xlabel="Epoch", ylabel="Loss", title="Loss")
+    ax_l.legend(fontsize=_SLIDE_FONT - 2)
+    if "val_rho_per_target" in hist.columns:
+        for tgt in config.TARGET_COLS:
+            vals = [d.get(tgt, np.nan) if isinstance(d, dict) else np.nan
+                    for d in hist["val_rho_per_target"]]
+            if not np.all(np.isnan(vals)):
+                ax_r.plot(hist["epoch"], vals, marker="o", lw=1.5, alpha=0.8,
+                          color=config.TARGET_COLORS[tgt], label=config.TARGET_LABELS[tgt])
+    ax_r.plot(hist["epoch"], hist["val_rho"], color="black", lw=2.5, ls="--", label="Mean")
+    ax_r.set(xlabel="Epoch", ylabel="Validation Spearman rho", title="Validation rho")
+    ax_r.legend(fontsize=_SLIDE_FONT - 4)
+    for ax in (ax_l, ax_r):
+        ax.title.set_fontsize(_SLIDE_FONT)
+        ax.grid(alpha=0.4)
+    fig.tight_layout()
+    return fig
+
+
+def plot_tier_progression(agg: pd.DataFrame) -> plt.Figure:
+    """Best test Spearman rho per tier (Tier 1 -> 2 -> 3 -> extras), one line per enzyme.
+
+    Each point is labelled with the winning model, so the reader can see whether a tier
+    buys anything over the previous one.
+    """
+    best = benchmark.tier_best(agg)
+    tiers = [t for t in benchmark.TIERS if t in set(best["Tier"])]
+    fig, ax = plt.subplots(figsize=(11, 6))
+    for tgt in config.TARGET_COLS:
+        sub = best[best["Target"] == tgt].set_index("Tier").reindex(tiers)
+        xs = np.arange(len(tiers))
+        ax.plot(xs, sub["Ours_rho"], marker="o", lw=2.5, ms=9,
+                color=config.TARGET_COLORS[tgt], label=config.TARGET_LABELS[tgt])
+        for xi, (rho, name) in enumerate(zip(sub["Ours_rho"], sub["Model"])):
+            if pd.notna(rho):
+                ax.annotate(name, (xi, rho), textcoords="offset points", xytext=(0, 9),
+                            ha="center", fontsize=9)
+    ax.set_xticks(np.arange(len(tiers)))
+    ax.set_xticklabels(tiers, fontsize=_SLIDE_FONT)
+    ax.set_ylabel("Best test Spearman rho in tier", fontsize=_SLIDE_FONT)
+    ax.set_title("Does each tier buy anything?", fontsize=_SLIDE_FONT + 2, fontweight="bold")
+    ax.legend(fontsize=_SLIDE_FONT - 2, loc="lower right")
+    ax.grid(alpha=0.4)
+    fig.tight_layout()
     return fig
