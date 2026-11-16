@@ -179,9 +179,15 @@ def plot_vs_paper(scoreboard_df: pd.DataFrame) -> plt.Figure:
             err = None if pd.isna(row["Ours_sd"]) else row["Ours_sd"]
             ax.bar(x[i] - w / 2, row["Ours_rho"], w, color=config.TARGET_COLORS[tgt],
                    yerr=err, capsize=4, ecolor="black")
+            top = row["Ours_rho"] + (err or 0.0)
+            ax.text(x[i] - w / 2, top + 0.004, f"{row['Ours_rho']:.3f}", ha="center",
+                    va="bottom", fontsize=9, rotation=90)
             approx = row["Paper_source"] == "figure (approx)"
             ax.bar(x[i] + w / 2, row["Paper_rho"], w, color="white" if approx else _PAPER_GREY,
                    edgecolor=_PAPER_GREY, hatch="//" if approx else None)
+            ax.text(x[i] + w / 2, row["Paper_rho"] + 0.004,
+                    f"~{row['Paper_rho']:.2f}" if approx else f"{row['Paper_rho']:.3f}",
+                    ha="center", va="bottom", fontsize=9, rotation=90)
         ax.set_xticks(x)
         ax.set_xticklabels(sub["Model"], rotation=30, ha="right", fontsize=_SLIDE_FONT - 2)
         ax.set_title(config.TARGET_LABELS[tgt], fontsize=_SLIDE_FONT, fontweight="bold")
@@ -235,13 +241,13 @@ def plot_training_curves(history_frame: pd.DataFrame) -> plt.Figure:
     return fig
 
 
-def plot_tier_progression(agg: pd.DataFrame) -> plt.Figure:
+def plot_tier_progression(agg: pd.DataFrame, assume_test: bool = False) -> plt.Figure:
     """Best test Spearman rho per tier (Tier 1 -> 2 -> 3 -> extras), one line per enzyme.
 
     Each point is labelled with the winning model, so the reader can see whether a tier
     buys anything over the previous one.
     """
-    best = benchmark.tier_best(agg)
+    best = benchmark.tier_best(agg, assume_test)
     tiers = [t for t in benchmark.TIERS if t in set(best["Tier"])]
     fig, ax = plt.subplots(figsize=(11, 6))
     for tgt in config.TARGET_COLS:

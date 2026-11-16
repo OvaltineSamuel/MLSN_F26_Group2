@@ -44,8 +44,7 @@ def test_scoreboard_marks_source_of_paper_number():
                         "Target": [WT] * 3,
                         "Spearman_rho_mean": [0.87, 0.78, 0.86],
                         "Spearman_rho_std": [0.001, 0.0, 0.002], "n_seeds": [3, 1, 3]})
-    with pytest.warns(UserWarning, match="Split"):
-        sb = benchmark.scoreboard(agg).set_index("Model")
+    sb = benchmark.scoreboard(agg, assume_test=True).set_index("Model")
     assert sb.loc["BiLSTM+bio", "Paper_rho"] == 0.8670
     assert sb.loc["BiLSTM+bio", "Paper_source"] == "text"
     assert sb.loc["Ridge", "Paper_source"] == "figure (approx)"
@@ -131,7 +130,7 @@ def test_best_per_target(agg):
     assert best.loc[WT, "Paper_model"] == "RNN+biofeature"
     assert best.loc[WT, "Paper_rho"] == 0.8670
     assert best.loc[WT, "Delta"] == pytest.approx(0.88 - 0.8670)
-    assert bool(best.loc[WT, "Beats_paper"]) is True
+    assert bool(best.loc[WT, "Ours_best_exceeds_paper_best"]) is True
 
 
 def test_caveat_is_non_empty():
@@ -213,7 +212,67 @@ def test_plot_vs_paper_default_window_when_data_is_high(agg):
     plt.close(fig)
 
 
-def test_scoreboard_warns_when_split_column_missing():
+def test_split_less_frame_raises_unless_assume_test():
     no_split = _agg([("CNN", WT, "Test", 0.84, 0.01, 3)]).drop(columns="Split")
-    with pytest.warns(UserWarning, match="Split"):
-        benchmark.scoreboard(no_split)
+    for fn in (benchmark.scoreboard, benchmark.best_per_target, benchmark.tier_best):
+        with pytest.raises(ValueError, match="Split"):
+            fn(no_split)
+        assert len(fn(no_split, assume_test=True)) == 1
+    with pytest.raises(ValueError, match="Split"):
+        plots.plot_tier_progression(no_split)
+
+
+def test_best_per_target_distinguishes_counterpart_and_names_comparison(agg):
+    best = benchmark.best_per_target(agg)
+    assert "Beats_paper" not in best.columns
+    assert list(best.columns) == [
+        "Target", "Best_model", "Best_has_paper_counterpart", "Ours_rho", "Ours_sd",
+        "Paper_model", "Paper_rho", "Delta", "Ours_best_exceeds_paper_best"]
+    assert not best["Best_has_paper_counterpart"].any()  # Transformer has no paper row
+    assert best["Ours_best_exceeds_paper_best"].all()
+    paired = _agg([("BiLSTM+bio", WT, "Test", 0.87, 0.001, 3)])
+    assert bool(benchmark.best_per_target(paired).loc[0, "Best_has_paper_counterpart"])
+
+
+def test_best_per_target_carries_selection_bias_note(agg):
+    best = benchmark.best_per_target(agg)
+    note = best.attrs["selection_note"]
+    assert note == benchmark.format_selection_note(8)
+    assert "post hoc" in note and "optimistically biased" in note and "8" in note
+    assert "tenfold" not in note  # separate from the paper caveat
+
+
+def test_sd_forced_nan_when_single_seed():
+    one = _agg([("CNN", WT, "Test", 0.84, 0.0, 1), ("CNN", ESP, "Test", 0.84, 0.0, 3)])
+    sb = benchmark.scoreboard(one)
+    assert pd.isna(sb.loc[0, "Ours_sd"]) and sb.loc[1, "Ours_sd"] == 0.0
+
+
+def test_format_scoreboard_approx_rows_not_falsely_precise():
+    rows = _agg([("Ridge", WT, "Test", 0.785, np.nan, 1),
+                 ("Ridge", ESP, "Test", 0.80, np.nan, 1),
+                 ("Ridge", HF1, "Test", 0.70, np.nan, 1),
+                 ("BiLSTM+bio", WT, "Test", 0.8700, 0.001, 3)])
+    shown = benchmark.format_scoreboard(benchmark.scoreboard(rows)).set_index(["Model", "Target"])
+    assert shown.loc[("Ridge", WT), "Delta"] == "~+0.01"
+    assert shown.loc[("Ridge", WT), "Beats paper"] == "within reading error"
+    assert shown.loc[("Ridge", ESP), "Beats paper"] == "yes"
+    assert shown.loc[("Ridge", HF1), "Beats paper"] == "no"
+    assert shown.loc[("BiLSTM+bio", WT), "Delta"] == "+0.0030"
+
+
+def test_plot_vs_paper_has_value_labels(agg):
+    fig = plots.plot_vs_paper(benchmark.scoreboard(agg))
+    labels = [t.get_text() for t in fig.axes[0].texts]
+    assert "0.870" in labels and "0.867" in labels
+    plt.close(fig)
+
+
+def test_caption_and_legend_do_not_overlap(agg):
+    fig = plots.plot_vs_paper(benchmark.scoreboard(agg))
+    fig.canvas.draw()
+    r = fig.canvas.get_renderer()
+    legend = fig.legends[0].get_window_extent(r)
+    caption = fig.texts[-1].get_window_extent(r)
+    assert caption.y1 < legend.y0
+    plt.close(fig)

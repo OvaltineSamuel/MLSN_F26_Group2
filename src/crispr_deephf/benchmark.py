@@ -14,8 +14,6 @@ This module must stay torch-free.
 
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
 import pandas as pd
 
@@ -29,6 +27,7 @@ __all__ = [
     "best_per_target",
     "format_caveat",
     "format_scoreboard",
+    "format_selection_note",
     "scoreboard",
     "tier_best",
 ]
@@ -59,8 +58,8 @@ SCOREBOARD_COLUMNS = [
     "Model", "Target", "Ours_rho", "Ours_sd", "Paper_rho", "Paper_source", "Delta", "Beats_paper",
 ]
 _BEST_COLUMNS = [
-    "Target", "Best_model", "Ours_rho", "Ours_sd", "Paper_model", "Paper_rho", "Delta",
-    "Beats_paper",
+    "Target", "Best_model", "Best_has_paper_counterpart", "Ours_rho", "Ours_sd", "Paper_model",
+    "Paper_rho", "Delta", "Ours_best_exceeds_paper_best",
 ]
 _PAPER_BEST_MODEL = "RNN+biofeature"
 
@@ -70,16 +69,28 @@ def format_caveat() -> str:
     return config.PAPER_CAVEAT
 
 
-def _test_rows(agg: pd.DataFrame) -> pd.DataFrame:
-    """Keep only held-out test rows; a frame without ``Split`` is taken as test-only (warns)."""
+def format_selection_note(n_candidates: int | None = None) -> str:
+    """Selection-bias note that must accompany a best-of-N-vs-paper comparison."""
+    n = "all" if n_candidates is None else f"all {n_candidates}"
+    return (
+        f"Our best model is selected post hoc from {n} candidate models scored on the test "
+        "set, whereas the paper's figure is its single reported model; this comparison is "
+        "therefore optimistically biased in our favour."
+    )
+
+
+def _test_rows(agg: pd.DataFrame, assume_test: bool = False) -> pd.DataFrame:
+    """Keep only held-out test rows.
+
+    ``runner.results_frame`` always emits ``Split``; a frame without it was hand-built, so
+    it is rejected unless the caller vouches for it with ``assume_test=True``.
+    """
     if "Split" not in agg.columns:
-        warnings.warn(
-            "aggregate frame has no 'Split' column; assuming every row is a held-out TEST "
-            "result. runner.results_frame always emits Split, so check this frame is not "
-            "validation data.",
-            UserWarning,
-            stacklevel=3,
-        )
+        if not assume_test:
+            raise ValueError(
+                "aggregate frame has no 'Split' column, so test rows cannot be told from "
+                "validation rows; pass assume_test=True only if every row is a test result"
+            )
         return agg
     out = agg[agg["Split"] == "Test"]
     if out.empty:
@@ -108,12 +119,20 @@ def _beats(ours: float, paper: float, source: str) -> bool:
     return bool(ours - paper > margin)
 
 
-def scoreboard(agg: pd.DataFrame) -> pd.DataFrame:
+def _guarded_sd(sd: object, n_seeds: object) -> float:
+    """Return the s.d., forced to NaN when fewer than two seeds back it."""
+    if sd is None or pd.isna(sd) or (n_seeds is not None and n_seeds <= 1):
+        return float("nan")
+    return float(sd)
+
+
+def scoreboard(agg: pd.DataFrame, assume_test: bool = False) -> pd.DataFrame:
     """Per-model, per-enzyme test Spearman rho beside the paper's number.
 
     Parameters
     ----------
     agg : DataFrame from ``runner.aggregate``. Rows with ``Split != "Test"`` are dropped.
+    assume_test : accept a frame with no ``Split`` column as all-test (else ValueError).
 
     Returns
     -------
@@ -123,15 +142,15 @@ def scoreboard(agg: pd.DataFrame) -> pd.DataFrame:
     False when there is nothing to beat.
     """
     rows = []
-    for rec in _test_rows(agg).itertuples(index=False):
+    for rec in _test_rows(agg, assume_test).itertuples(index=False):
         paper, source, _ = _paper_lookup(rec.Model, rec.Target)
         ours = float(rec.Spearman_rho_mean)
-        sd = getattr(rec, "Spearman_rho_std", np.nan)
+        sd = _guarded_sd(getattr(rec, "Spearman_rho_std", np.nan), getattr(rec, "n_seeds", None))
         rows.append({
             "Model": rec.Model,
             "Target": rec.Target,
             "Ours_rho": ours,
-            "Ours_sd": np.nan if sd is None else float(sd),
+            "Ours_sd": sd,
             "Paper_rho": paper,
             "Paper_source": source,
             "Delta": ours - paper,
@@ -140,9 +159,15 @@ def scoreboard(agg: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=SCOREBOARD_COLUMNS)
 
 
-def best_per_target(agg: pd.DataFrame) -> pd.DataFrame:
-    """Our best test model per enzyme against the paper's best (``RNN+biofeature``)."""
-    test = _test_rows(agg)
+def best_per_target(agg: pd.DataFrame, assume_test: bool = False) -> pd.DataFrame:
+    """Our best test model per enzyme against the paper's best (``RNN+biofeature``).
+
+    ``Best_has_paper_counterpart`` says whether the winning model has a paper row of its own;
+    ``Ours_best_exceeds_paper_best`` is a best-of-N vs single-number comparison, not a
+    like-for-like win. The selection-bias note is in ``result.attrs["selection_note"]``;
+    print it beside the table, together with ``format_caveat()``.
+    """
+    test = _test_rows(agg, assume_test)
     rows = []
     for target in config.TARGET_COLS:
         sub = test[test["Target"] == target]
@@ -151,23 +176,26 @@ def best_per_target(agg: pd.DataFrame) -> pd.DataFrame:
         best = sub.loc[sub["Spearman_rho_mean"].idxmax()]
         paper = config.PAPER_SPEARMAN[_PAPER_BEST_MODEL][config.TARGET_KEYS[target]]
         ours = float(best["Spearman_rho_mean"])
-        sd = best.get("Spearman_rho_std", np.nan)
+        sd = _guarded_sd(best.get("Spearman_rho_std", np.nan), best.get("n_seeds"))
         rows.append({
             "Target": target,
             "Best_model": best["Model"],
+            "Best_has_paper_counterpart": best["Model"] in PAPER_EQUIVALENT,
             "Ours_rho": ours,
-            "Ours_sd": float(sd),
+            "Ours_sd": sd,
             "Paper_model": _PAPER_BEST_MODEL,
             "Paper_rho": paper,
             "Delta": ours - paper,
-            "Beats_paper": _beats(ours, paper, "text"),
+            "Ours_best_exceeds_paper_best": _beats(ours, paper, "text"),
         })
-    return pd.DataFrame(rows, columns=_BEST_COLUMNS)
+    out = pd.DataFrame(rows, columns=_BEST_COLUMNS)
+    out.attrs["selection_note"] = format_selection_note(int(test["Model"].nunique()))
+    return out
 
 
-def tier_best(agg: pd.DataFrame) -> pd.DataFrame:
+def tier_best(agg: pd.DataFrame, assume_test: bool = False) -> pd.DataFrame:
     """Best test model per tier and enzyme: ``Tier, Target, Model, Ours_rho``."""
-    test = _test_rows(agg)
+    test = _test_rows(agg, assume_test)
     rows = []
     for tier, names in TIERS.items():
         for target in config.TARGET_COLS:
@@ -200,8 +228,27 @@ def format_scoreboard(sb: pd.DataFrame) -> pd.DataFrame:
     out["Ours (rho ± sd)"] = sb.apply(ours, axis=1)
     out["Paper rho"] = sb.apply(paper, axis=1)
     out["Paper source"] = sb["Paper_source"]
-    out["Delta"] = sb["Delta"].map(lambda d: "" if pd.isna(d) else f"{d:+.4f}")
+    out["Delta"] = [_fmt_delta(d, s) for d, s in zip(sb["Delta"], sb["Paper_source"])]
     out["Beats paper"] = [
-        ("yes" if b else "no") if s else "" for b, s in zip(sb["Beats_paper"], sb["Paper_source"])
+        _fmt_verdict(b, d, s)
+        for b, d, s in zip(sb["Beats_paper"], sb["Delta"], sb["Paper_source"])
     ]
     return out
+
+
+def _fmt_delta(delta: float, source: str) -> str:
+    """Delta at the precision of the paper number: 2 decimals and ``~`` if figure-read."""
+    if pd.isna(delta):
+        return ""
+    return f"~{delta:+.2f}" if source == "figure (approx)" else f"{delta:+.4f}"
+
+
+def _fmt_verdict(beats: bool, delta: float, source: str) -> str:
+    """yes / no / within reading error (approx paper numbers only) / blank (no counterpart)."""
+    if not source:
+        return ""
+    if beats:
+        return "yes"
+    if source == "figure (approx)" and abs(delta) <= APPROX_TOLERANCE:
+        return "within reading error"
+    return "no"
