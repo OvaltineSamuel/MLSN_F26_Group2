@@ -27,6 +27,7 @@ __all__ = [
     "XGBOOST_AVAILABLE",
     "available_trainers",
     "compute_metrics",
+    "safe_spearman",
     "train_catboost",
     "train_lightgbm",
     "train_ridge",
@@ -83,6 +84,22 @@ def compute_metrics(
         "MAE": mean_absolute_error(y_true, y_pred),
         "R2": r2_score(y_true, y_pred),
     }
+
+
+def safe_spearman(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Spearman *rho*, returning ``0.0`` instead of ``NaN`` when it is undefined.
+
+    ``scipy.stats.spearmanr`` returns NaN when either input is constant (or has
+    fewer than two points). Early in training a network often emits one value for
+    every input; a NaN rho would make every ``rho > best`` comparison false and
+    poison early stopping and the scoreboard, so it is reported as no correlation.
+    """
+    y_true = np.asarray(y_true, dtype=np.float64)
+    y_pred = np.asarray(y_pred, dtype=np.float64)
+    if y_true.size < 2 or np.ptp(y_true) == 0.0 or np.ptp(y_pred) == 0.0:
+        return 0.0
+    rho = spearmanr(y_true, y_pred)[0]
+    return float(rho) if np.isfinite(rho) else 0.0
 
 
 # --------------------------------------------------------------------------- #
