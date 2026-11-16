@@ -542,3 +542,32 @@ def test_aggregate_does_not_mix_val_and_test_rows():
     assert agg.loc["Val", "Spearman_rho_mean"] == pytest.approx(0.1)
     assert agg.loc["Test", "Spearman_rho_mean"] == pytest.approx(0.9)
     assert (agg["n_seeds"] == 2).all()
+
+
+def test_tuning_best_params_file_is_not_mistaken_for_a_result(tmp_path, paths):
+    """``tuning.save_best_params`` writes ``best_params.json`` into ``paths.results``.
+
+    ``load_results`` globs ``*.json``, so that file came back as a run payload and every
+    consumer that indexed it by ``model_name`` raised KeyError. Regression test for the
+    crash the real notebook hit in section 12e once Optuna had run.
+    """
+    runner.save_result(paths.results, "CNN__WT__seed0", {"model_name": "CNN", "test": {}})
+    tuning_module = pytest.importorskip("crispr_deephf.tuning")
+    tuning_module.save_best_params(paths.results / "best_params.json", "CNN", {"lr": 0.001})
+
+    loaded = runner.load_results(paths.results)
+    assert [r["model_name"] for r in loaded] == ["CNN"]
+    assert all("model_name" in r for r in loaded)  # the crash was r["model_name"]
+    assert not runner.is_result_payload({"CNN": {"lr": 0.001}})
+    assert runner.is_result_payload({"model_name": "CNN"})
+
+
+def test_unrelated_json_in_the_results_dir_is_skipped_quietly(tmp_path):
+    """A JSON object that is simply not a result is not corrupt, so it must not warn."""
+    runner.save_result(tmp_path, "CNN__WT__seed0", {"model_name": "CNN"})
+    (tmp_path / "notes.json").write_text('{"todo": "rerun eSp"}', encoding="utf-8")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        loaded = runner.load_results(tmp_path)
+    assert [r["model_name"] for r in loaded] == ["CNN"]

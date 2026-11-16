@@ -395,3 +395,20 @@ def test_the_signature_check_rebuilds_signatures_correctly():
                     f"AST signature for {name}.{attr} disagrees with the real one: "
                     f"{rebuilt} vs {real}"
                 )
+
+
+def test_colab_detection_survives_a_machine_with_no_google_package():
+    """The guard that keeps cell 1 from dying locally on ``No module named 'google'``.
+
+    ``importlib.util.find_spec("google.colab")`` imports the parent ``google`` package
+    first and raises ModuleNotFoundError when nothing provides it -- the normal state of
+    a clean conda env. Unguarded, the notebook's first cell crashed before printing a
+    single line; this was found by executing it, not by reading it.
+    """
+    src = _nb().cells[1].source
+    head = src.split("# [A] GOOGLE COLAB")[0]
+    namespace: dict = {}
+    # exec is the point: this runs the cell's own detection code, not a copy of it.
+    exec(compile(head, "<setup-cell-head>", "exec"), namespace)  # noqa: S102
+    assert isinstance(namespace["IN_COLAB"], bool)
+    assert namespace["detect_colab"]() is namespace["IN_COLAB"]

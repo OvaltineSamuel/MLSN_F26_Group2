@@ -106,7 +106,10 @@ N_BIO_FEATURES = len(GLOBAL_FEATURE_NAMES) + len(POSITIONAL_CHANNEL_NAMES) * SEQ
 
 def _require_vienna() -> None:
     if not (VIENNA_AVAILABLE and BIOPYTHON_AVAILABLE):
-        raise ImportError("Bio features need ViennaRNA and Biopython (pip install ViennaRNA biopython).")
+        raise ImportError(
+            "Bio features need ViennaRNA and Biopython "
+            "(pip install ViennaRNA biopython)."
+        )
 
 
 # --------------------------------------------------------------------------- #

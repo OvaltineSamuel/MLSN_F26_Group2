@@ -47,6 +47,7 @@ from crispr_deephf.train_torch import evaluate_split, predict, set_seed, train_m
 
 __all__ = [
     "aggregate",
+    "is_result_payload",
     "load_results",
     "result_key",
     "results_frame",
@@ -136,17 +137,32 @@ def _read_result(path: Path) -> dict | None:
     return payload
 
 
+def is_result_payload(payload: object) -> bool:
+    """True if *payload* looks like a run result written by this module.
+
+    The results directory is not private: :func:`tuning.save_best_params` writes
+    ``best_params.json`` there, and anyone may drop a JSON note beside the runs.
+    ``model_name`` is the one field every result carries and every consumer indexes by, so
+    its absence is the test. Without this check the notebook's diagnostics cell raised
+    ``KeyError: 'model_name'`` on ``best_params.json`` as soon as the Optuna section had
+    run once -- found by executing the notebook, not by reading it.
+    """
+    return isinstance(payload, dict) and "model_name" in payload
+
+
 def load_results(results_dir: Path) -> list[dict]:
     """Read every valid ``*.json`` result in *results_dir*, in file-name order.
 
     Unreadable or truncated files are skipped with a warning rather than raising, so one
-    corrupt file cannot take down a whole report.
+    corrupt file cannot take down a whole report. JSON files that are *not* run results
+    (``best_params.json`` and anything else sharing the directory) are skipped silently --
+    they are not corrupt, they are simply not results. See :func:`is_result_payload`.
     """
     results_dir = Path(results_dir)
     if not results_dir.is_dir():
         return []
     loaded = (_read_result(p) for p in sorted(results_dir.glob("*.json")))
-    return [r for r in loaded if r is not None]
+    return [r for r in loaded if is_result_payload(r)]
 
 
 def _reusable(payload: dict | None, *, mode: dict, digest: str, targets: list[str]) -> bool:

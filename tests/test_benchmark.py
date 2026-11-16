@@ -276,3 +276,21 @@ def test_caption_and_legend_do_not_overlap(agg):
     caption = fig.texts[-1].get_window_extent(r)
     assert caption.y1 < legend.y0
     plt.close(fig)
+
+
+def test_generated_stack_name_is_tier1_not_dropped():
+    """``run_stack`` emits ``Stack(<tree>+<deep>)``; TIERS lists the bare ``Stack``.
+
+    Matching on the literal name alone silently dropped the stacking ensemble from
+    ``tier_best`` and so from the tier-progression figure.
+    """
+    assert benchmark.tier_of("Stack(XGBoost+BiLSTM+bio)") == "Tier 1"
+    assert benchmark.tier_of("Stack") == "Tier 1"
+    assert benchmark.tier_of("BiLSTM+bio") == "Tier 3"
+    assert benchmark.tier_of("MLP") is None
+
+    rows = _agg([("Ridge", WT, "Test", 0.70, np.nan, 1),
+                 ("Stack(XGBoost+CNN)", WT, "Test", 0.90, np.nan, 1)])
+    tiers = benchmark.tier_best(rows).set_index(["Tier", "Target"])
+    assert tiers.loc[("Tier 1", WT), "Model"] == "Stack(XGBoost+CNN)"
+    assert tiers.loc[("Tier 1", WT), "Ours_rho"] == pytest.approx(0.90)

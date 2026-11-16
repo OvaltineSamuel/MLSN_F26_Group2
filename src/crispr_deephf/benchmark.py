@@ -30,6 +30,7 @@ __all__ = [
     "format_selection_note",
     "scoreboard",
     "tier_best",
+    "tier_of",
 ]
 
 #: Our run name -> the paper's row. Anything absent has no paper counterpart. The paper's
@@ -62,6 +63,21 @@ _BEST_COLUMNS = [
     "Paper_rho", "Delta", "Ours_best_exceeds_paper_best",
 ]
 _PAPER_BEST_MODEL = "RNN+biofeature"
+
+
+def tier_of(model_name: str) -> str | None:
+    """Return the :data:`TIERS` key *model_name* belongs to, or ``None`` if none does.
+
+    ``runner.run_stack`` names its result ``Stack(<tree>+<deep>)``, not the bare
+    ``"Stack"`` that :data:`TIERS` lists, so a generated stack name is matched on its
+    prefix. Plain membership would drop the stacking ensemble from every tier table and
+    from the tier-progression figure without saying so.
+    """
+    base = "Stack" if model_name.startswith("Stack(") else model_name
+    for tier, names in TIERS.items():
+        if base in names:
+            return tier
+    return None
 
 
 def format_caveat() -> str:
@@ -194,12 +210,17 @@ def best_per_target(agg: pd.DataFrame, assume_test: bool = False) -> pd.DataFram
 
 
 def tier_best(agg: pd.DataFrame, assume_test: bool = False) -> pd.DataFrame:
-    """Best test model per tier and enzyme: ``Tier, Target, Model, Ours_rho``."""
+    """Best test model per tier and enzyme: ``Tier, Target, Model, Ours_rho``.
+
+    Tier membership is resolved with :func:`tier_of`, so a generated ``Stack(...)`` name
+    counts as Tier 1. A model in no tier is simply absent.
+    """
     test = _test_rows(agg, assume_test)
+    tiers = test["Model"].map(tier_of)
     rows = []
-    for tier, names in TIERS.items():
+    for tier in TIERS:
         for target in config.TARGET_COLS:
-            sub = test[test["Model"].isin(names) & (test["Target"] == target)]
+            sub = test[(tiers == tier) & (test["Target"] == target)]
             if sub.empty:
                 continue
             best = sub.loc[sub["Spearman_rho_mean"].idxmax()]

@@ -12,6 +12,7 @@ whole notebook. Ridge always works (scikit-learn is a hard dependency).
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 
 import numpy as np
@@ -127,13 +128,19 @@ def train_lightgbm(X_train, y_train, X_val, y_val, *, early_stopping_rounds: int
         n_jobs=-1,
         verbose=-1,
     )
-    model.fit(
-        X_train,
-        y_train,
-        eval_set=[(X_val, y_val)],
-        eval_metric="rmse",
-        callbacks=[lgb.early_stopping(early_stopping_rounds, verbose=False)],
-    )
+    fit_kwargs: dict = {
+        "eval_metric": "rmse",
+        "callbacks": [lgb.early_stopping(early_stopping_rounds, verbose=False)],
+    }
+    # LightGBM 4.7 deprecated ``eval_set`` in favour of ``eval_X`` / ``eval_y`` and warns
+    # on every fit; earlier 4.x releases (which pyproject still allows, and which some
+    # Colab images ship) only know ``eval_set``. Ask the installed version which it is,
+    # so the call is both silent here and survives the removal of ``eval_set``.
+    if "eval_X" in inspect.signature(model.fit).parameters:
+        fit_kwargs.update(eval_X=X_val, eval_y=y_val)
+    else:
+        fit_kwargs["eval_set"] = [(X_val, y_val)]
+    model.fit(X_train, y_train, **fit_kwargs)
     return model
 
 

@@ -29,6 +29,11 @@ deep = ["torch>=2.1", "biopython>=1.82", "ViennaRNA>=2.6", "optuna>=3.5"]
 [tool.ruff]
 line-length = 100
 
+[tool.ruff.lint]
+# The 100-column limit is a project rule, so make ruff enforce it rather than
+# leaving it to review: E501 is not in ruff's default rule set.
+extend-select = ["E501"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

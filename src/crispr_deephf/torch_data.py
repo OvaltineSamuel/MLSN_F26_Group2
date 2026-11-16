@@ -185,7 +185,8 @@ def build_splits(
     y = np.where(measured, raw, 0.0).astype(np.float32)
     mask = measured.astype(np.float32)
 
-    ids = (df["gRNA_ID"] if "gRNA_ID" in df.columns else pd.Series(df.index, index=df.index)).to_numpy()
+    id_series = df["gRNA_ID"] if "gRNA_ID" in df.columns else pd.Series(df.index, index=df.index)
+    ids = id_series.to_numpy()
 
     labels = df[split_col].to_numpy()
     idx = {name: np.where(labels == name)[0] for name in SPLIT_NAMES}

@@ -116,13 +116,19 @@ def plot_feature_importance(
         .sort_values("Importance", ascending=False)
         .head(top_n)
     )
-    fig = plt.figure(figsize=(10, 8))
-    sns.barplot(data=imp, x="Importance", y="Feature", palette="viridis")
-    plt.title(title, fontsize=13, fontweight="bold")
-    plt.xlabel("Feature Importance")
-    plt.ylabel("Engineered Feature")
-    plt.grid(axis="x", linestyle="--", alpha=0.5)
-    plt.tight_layout()
+    # Drawn with matplotlib rather than ``sns.barplot(palette=...)``: seaborn >= 0.13
+    # raises a FutureWarning for a palette with no ``hue``, and the ``hue`` +
+    # ``legend=False`` replacement does not exist in seaborn 0.12, which pyproject
+    # still allows. One colour per bar needs no categorical machinery anyway.
+    fig, ax = plt.subplots(figsize=(10, 8))
+    colors = plt.get_cmap("viridis")(np.linspace(0.15, 0.9, len(imp)))
+    ax.barh(imp["Feature"].tolist(), imp["Importance"].to_numpy(), color=colors)
+    ax.invert_yaxis()  # most important feature on top
+    ax.set_title(title, fontsize=13, fontweight="bold")
+    ax.set_xlabel("Feature Importance")
+    ax.set_ylabel("Engineered Feature")
+    ax.grid(axis="x", linestyle="--", alpha=0.5)
+    fig.tight_layout()
     return fig
 
 
