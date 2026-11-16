@@ -58,6 +58,7 @@ except ImportError:  # pragma: no cover - environment dependent
 
 __all__ = [
     "OPTUNA_AVAILABLE",
+    "apply_best_params",
     "load_best_params",
     "save_best_params",
     "search_deep",
@@ -72,6 +73,8 @@ _PATIENCE = 10
 _TUPLE_FIELDS = ("kernel_widths", "hidden_dims")
 
 # Categorical choices are named strings (Optuna stores primitives only) mapped to tuples here.
+_TRAIN_KEYS = ("lr", "weight_decay")
+
 _KERNELS = {"3-5-7": (3, 5, 7), "3-5": (3, 5), "5": (5,), "7": (7,)}
 _HIDDEN = {"256-128": (256, 128), "512-128": (512, 128), "128-64": (128, 64), "256": (256,)}
 
@@ -99,6 +102,12 @@ def suggest_config(trial: object, model_name: str) -> dict:
     Transformer ``embed_dim``/``n_heads``/``n_transformer_layers``. ``bio_embed_dim`` is
     only suggested for models that actually build the bio branch. The batch size is not
     searched.
+
+    Depth caveat: ``rnn_layers`` is searched over {1, 2}, but the registry pins it to 1 on
+    every recurrent entry (fidelity to the teammate's single ``Bidirectional(LSTM(128))``,
+    constant depth across the Tier-2 and Tier-2-vs-Tier-3 comparisons, and the paper's
+    single-layer RNN row). A tuned model that adopts ``rnn_layers=2`` silently breaks that
+    depth-matched ablation; if so, report the comparison as not depth-matched.
 
     Parameters
     ----------
@@ -165,6 +174,7 @@ def search_deep(
     n_trials: int = 40,
     epochs: int = 20,
     device: str,
+    storage: str | None = None,
 ) -> dict:
     """Search hyper-parameters for one single-target deep model, maximising **validation** rho.
 
@@ -172,7 +182,10 @@ def search_deep(
     **validation** Spearman rho :func:`train_model` reached. The test split is never read
     here (see the module docstring): tuning on it would make the final comparison
     optimistic. The study is in memory and uses a seeded TPE sampler, so the same inputs
-    reproduce the same search.
+    reproduce the same search. Pass ``storage="sqlite:///.../study.db"`` (as the team's
+    ``models/Experiments.py:cmd_search`` does) to make the search resumable: finished trials
+    persist and a re-run with the same storage continues the study, so a disconnected Colab
+    session loses at most one trial.
 
     Parameters
     ----------
@@ -185,6 +198,9 @@ def search_deep(
     n_trials : number of Optuna trials.
     epochs : epochs per trial (early stopping still applies).
     device : torch device string.
+    storage : optional Optuna storage URL, e.g. ``"sqlite:///results/study.db"``. ``None``
+        (default) keeps the study in memory. When set, ``load_if_exists=True`` resumes an
+        existing study of the same name; ``n_trials`` then counts *additional* trials.
 
     Returns
     -------
@@ -258,6 +274,8 @@ def search_deep(
         direction="maximize",
         study_name=f"deephf-{model_name}-{target_key}",
         sampler=optuna.samplers.TPESampler(seed=0),
+        storage=storage,
+        load_if_exists=storage is not None,
     )
     study.optimize(objective, n_trials=n_trials)  # no catch: a broken trial must stop it loudly
 
@@ -311,6 +329,22 @@ def save_best_params(path: Path, model_name: str, params: Mapping) -> None:
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
         raise
+
+
+def apply_best_params(params: Mapping) -> tuple[dict, dict]:
+    """Split tuned params into ``(model_overrides, train_kwargs)``.
+
+    ``model_overrides`` holds the ``ModelConfig`` fields, ready for
+    ``build_model(name, **model_overrides)``; ``train_kwargs`` holds ``lr`` and
+    ``weight_decay`` for the training loop. Using this instead of a hand-rolled ``pop``
+    keeps a tuned learning rate from leaking into ``build_model`` (where it would raise).
+
+    Depth caveat: if the params change ``rnn_layers`` from the registry's pinned 1, the
+    Tier-2 vs Tier-3 comparison is no longer depth-matched and must be reported as such.
+    """
+    train_kwargs = {k: params[k] for k in _TRAIN_KEYS if k in params}
+    overrides = {k: v for k, v in params.items() if k not in _TRAIN_KEYS}
+    return overrides, train_kwargs
 
 
 def load_best_params(path: Path, model_name: str) -> dict:

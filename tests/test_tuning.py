@@ -207,3 +207,22 @@ def test_search_deep_best_params_feed_back_into_build_model(split_df, paths):
     params = dict(out["best_params"])
     params.pop("lr"), params.pop("weight_decay")
     architectures.build_model("CNN", **params)
+
+
+# --------------------------------------------------------------------------- #
+# apply_best_params / resumable storage
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("model_name", ["CNN+bio", "BiLSTM", "Transformer"])
+def test_apply_best_params_roundtrip_builds_a_model(tmp_path, model_name):
+    p = tmp_path / "best_params.json"
+    tuning.save_best_params(p, model_name, tuning.suggest_config(_fresh_trial(1), model_name))
+    overrides, train_kwargs = tuning.apply_best_params(tuning.load_best_params(p, model_name))
+    assert set(train_kwargs) == {"lr", "weight_decay"}
+    assert not {"lr", "weight_decay"} & set(overrides)
+    architectures.build_model(model_name, **overrides)
+
+
+def test_search_deep_sqlite_storage_resumes(split_df, paths, tmp_path):
+    url = f"sqlite:///{(tmp_path / 'study.db').as_posix()}"
+    assert len(_search(split_df, paths, n_trials=1, storage=url)["study"].trials) == 1
+    assert len(_search(split_df, paths, n_trials=1, storage=url)["study"].trials) == 2
