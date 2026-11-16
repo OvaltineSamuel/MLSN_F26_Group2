@@ -22,7 +22,8 @@ dependencies = [
 [project.optional-dependencies]
 # Tier-1 gradient-boosting baselines (install if your Python has wheels).
 boosters = ["lightgbm>=4.0", "xgboost>=2.0", "catboost>=1.2"]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+# nbformat: the notebook contract tests in tests/test_notebook.py parse the notebook.
+dev = ["pytest>=8.0", "ruff>=0.6", "nbformat>=5.9"]
 deep = ["torch>=2.1", "biopython>=1.82", "ViennaRNA>=2.6", "optuna>=3.5"]
 
 [tool.ruff]
