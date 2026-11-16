@@ -11,7 +11,12 @@ hours); they parse it. What they protect:
 * every code cell is plain, compilable Python -- a syntax error in cell 30 of a
   notebook is otherwise only discovered three hours into a Colab run;
 * every call into ``crispr_deephf`` matches the real signature, so a typo'd
-  keyword cannot hide until the run reaches that cell;
+  keyword cannot hide until the run reaches that cell. The package modules are
+  *parsed*, not imported, so this check runs in CI as well -- CI installs the dev
+  extra only, and ``runner`` / ``architectures`` / ``tuning`` cannot be imported
+  without torch. One separate test does import them, purely to confirm the
+  AST-rebuilt signatures agree with what Python itself reports; only that one
+  test skips without torch;
 * the multi-target run uses ``shared_split`` and single-target runs do not --
   the data leak the team warned about in ``models/CNN.py``;
 * the comparability caveat and the selection-bias note are printed
@@ -32,6 +37,7 @@ nbformat = pytest.importorskip("nbformat")
 
 ROOT = Path(__file__).resolve().parents[1]
 NB = ROOT / "notebooks" / "crispr_deephf_pipeline.ipynb"
+SRC = ROOT / "src" / "crispr_deephf"
 
 #: Package modules the notebook is allowed to call, checked against their real signatures.
 PACKAGE_MODULES = (
@@ -163,9 +169,16 @@ def test_setup_cell_warns_on_a_runtime_mismatch():
 
 
 def test_run_switch_defaults_are_safe():
-    all_src = _all_source(_nb())
-    assert "RUN_TUNING = False" in all_src
-    assert "FORCE_RERUN = False" in all_src
+    """The shipped defaults must not start hours of GPU training on the first `Run all`."""
+    code = "\n".join(c.source for c in _code_cells(_nb()))
+    assert 'MODE = "quick"' in code, (
+        'MODE must ship as "quick" (3 epochs, 1 seed); flipping to "full" is a deliberate edit'
+    )
+    assert 'MODE = "full"' not in code, (
+        'no code cell may set MODE = "full"; the markdown tells the reader to change it'
+    )
+    assert "RUN_TUNING = False" in code
+    assert "FORCE_RERUN = False" in code
 
 
 def test_required_sections_are_all_present():
@@ -256,29 +269,129 @@ def test_package_module_aliases_are_imported():
         assert mod in code
 
 
+def _module_bindings(name: str) -> dict[str, ast.AST]:
+    """Names bound at module level in ``src/crispr_deephf/<name>.py``, as AST nodes.
+
+    Parsed rather than imported, so this runs in CI, which installs no torch and could
+    not import ``runner`` / ``architectures`` / ``tuning`` at all. Descends into
+    ``try``/``if`` bodies (that is where ``VIENNA_AVAILABLE`` and ``OPTUNA_AVAILABLE``
+    are set) but never into a function body.
+    """
+    path = SRC / f"{name}.py"
+    assert path.is_file(), f"no such module: {path}"
+    out: dict[str, ast.AST] = {}
+
+    def visit(body: list[ast.stmt]) -> None:
+        for node in body:
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                out[node.name] = node
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        out[target.id] = node
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                out[node.target.id] = node
+            elif isinstance(node, ast.Import | ast.ImportFrom):
+                for alias in node.names:
+                    out[(alias.asname or alias.name).split(".")[0]] = node
+            elif isinstance(node, ast.Try):
+                visit(node.body)
+                visit(node.orelse)
+                visit(node.finalbody)
+                for handler in node.handlers:
+                    visit(handler.body)
+            elif isinstance(node, ast.If):
+                visit(node.body)
+                visit(node.orelse)
+
+    visit(ast.parse(path.read_text(encoding="utf-8")).body)
+    return out
+
+
+def _signature_from_ast(node: ast.AST) -> inspect.Signature | None:
+    """Rebuild a function's signature from its ``def`` line, or None if it cannot be trusted.
+
+    Returns None for anything decorated (a decorator can rewrite the signature) and for
+    non-callables such as module constants, which the caller then skips.
+    """
+    if isinstance(node, ast.ClassDef):
+        if node.decorator_list:
+            return None  # e.g. @dataclass synthesises __init__
+        init = next(
+            (n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"),
+            None,
+        )
+        return None if init is None else _signature_from_ast_function(init, drop_first=True)
+    if isinstance(node, ast.FunctionDef) and not node.decorator_list:
+        return _signature_from_ast_function(node)
+    return None
+
+
+def _signature_from_ast_function(
+    node: ast.FunctionDef, *, drop_first: bool = False
+) -> inspect.Signature:
+    kind = inspect.Parameter
+    args = node.args
+    names = [*args.posonlyargs, *args.args]
+    kinds = [kind.POSITIONAL_ONLY] * len(args.posonlyargs) + [
+        kind.POSITIONAL_OR_KEYWORD
+    ] * len(args.args)
+    if drop_first and names:  # 'self'
+        names, kinds = names[1:], kinds[1:]
+    # Defaults always align to the tail of the positional list, and 'self' never has one.
+    n_required = len(names) - len(args.defaults)
+    params = [
+        kind(a.arg, k, default=kind.empty if i < n_required else None)
+        for i, (a, k) in enumerate(zip(names, kinds, strict=True))
+    ]
+    if args.vararg:
+        params.append(kind(args.vararg.arg, kind.VAR_POSITIONAL))
+    for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True):
+        params.append(
+            kind(arg.arg, kind.KEYWORD_ONLY, default=kind.empty if default is None else None)
+        )
+    if args.kwarg:
+        params.append(kind(args.kwarg.arg, kind.VAR_KEYWORD))
+    return inspect.Signature(params)
+
+
 def test_every_package_call_matches_the_real_signature():
-    pytest.importorskip("torch")  # architectures / runner / tuning need it
-    modules = {name: importlib.import_module(f"crispr_deephf.{name}") for name in PACKAGE_MODULES}
+    """Catch a typo'd keyword here, not three hours into the user's Colab run.
+
+    Deliberately torch-free: the package modules are *parsed*, not imported, so this test
+    runs in CI (which installs the dev extra only) instead of silently skipping there.
+    """
+    bindings = {name: _module_bindings(name) for name in PACKAGE_MODULES}
     checked = 0
     for mod, attr, node, _ in _module_calls(_nb()):
-        module = modules[mod]
-        assert hasattr(module, attr), f"crispr_deephf.{mod} has no attribute {attr!r}"
-        obj = getattr(module, attr)
-        if not callable(obj):
-            continue
+        assert attr in bindings[mod], f"crispr_deephf.{mod} has no attribute {attr!r}"
+        sig = _signature_from_ast(bindings[mod][attr])
+        if sig is None:
+            continue  # not a plain function/class we can rebuild
         if any(isinstance(a, ast.Starred) for a in node.args) or any(
             k.arg is None for k in node.keywords
         ):
             continue  # unpacked call: cannot be checked statically
         try:
-            sig = inspect.signature(obj)
-        except (TypeError, ValueError):  # pragma: no cover - builtins
-            continue
-        placeholders = [object()] * len(node.args)
-        kwargs = {k.arg: object() for k in node.keywords}
-        try:
-            sig.bind(*placeholders, **kwargs)
+            sig.bind(*[object()] * len(node.args), **{k.arg: object() for k in node.keywords})
         except TypeError as exc:
             pytest.fail(f"{mod}.{attr}{sig} called wrongly in the notebook: {exc}")
         checked += 1
-    assert checked >= 20, f"only {checked} package calls checked; the alias map looks wrong"
+    assert checked >= 25, f"only {checked} package calls checked; the alias map looks wrong"
+
+
+def test_the_signature_check_rebuilds_signatures_correctly():
+    """Guard the guard: the AST-rebuilt signature must match what Python itself reports."""
+    pytest.importorskip("torch")  # runner / tuning cannot be imported without it
+    for name in PACKAGE_MODULES:
+        module = importlib.import_module(f"crispr_deephf.{name}")
+        for attr, node in _module_bindings(name).items():
+            rebuilt = _signature_from_ast(node)
+            if rebuilt is None or not hasattr(module, attr):
+                continue
+            real = inspect.signature(getattr(module, attr))
+            assert [(p.name, p.kind, p.default is p.empty) for p in rebuilt.parameters.values()] \
+                == [(p.name, p.kind, p.default is p.empty) for p in real.parameters.values()], (
+                    f"AST signature for {name}.{attr} disagrees with the real one: "
+                    f"{rebuilt} vs {real}"
+                )
