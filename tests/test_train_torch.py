@@ -88,7 +88,14 @@ def _three_target_model():
 # train_model / predict / evaluate_split
 # --------------------------------------------------------------------------- #
 def _train(
-    df, tmp_path, name="CNN", target_cols=("WT_Efficiency",), epochs=2, seed=0, **overrides
+    df,
+    tmp_path,
+    name="CNN",
+    target_cols=("WT_Efficiency",),
+    epochs=2,
+    seed=0,
+    target_names=None,
+    **overrides,
 ):
     loaders = _loaders(df, list(target_cols))
     train_torch.set_seed(seed)
@@ -101,6 +108,7 @@ def _train(
         patience=1,
         device="cpu",
         checkpoint_path=tmp_path / "best.pt",
+        target_names=target_names,
         verbose=False,
     )
     return res, loaders
@@ -167,3 +175,35 @@ def test_evaluate_split_scores_only_measured_entries(synthetic_df):
         keep = mask[:, t] == 1.0
         expected = models.compute_metrics(y_true[keep, t], y_pred[keep, t])
         assert row["RMSE"] == pytest.approx(expected["RMSE"])
+
+
+@pytest.mark.parametrize("n_keep", [0, 1])
+def test_evaluate_split_tiny_target_gives_nan_row_and_warns(synthetic_df, n_keep):
+    loaders = _loaders(synthetic_df, list(config.TARGET_COLS))
+    loader = loaders["test"]
+    ds = loader.dataset
+    mask = ds.tensors[3].clone()
+    mask[:, 1] = 0.0
+    mask[:n_keep, 1] = 1.0  # exactly n_keep measured entries for target 1
+    ds.tensors = (*ds.tensors[:3], mask)
+    model = _three_target_model()
+    with pytest.warns(UserWarning, match="eSpCas9_Efficiency"):
+        rows = train_torch.evaluate_split(model, loader, "cpu", list(config.TARGET_COLS))
+    assert len(rows) == 3
+    assert rows[1]["n_measured"] == n_keep
+    assert all(np.isnan(rows[1][k]) for k in ("Pearson_r", "Spearman_rho", "RMSE", "MAE", "R2"))
+    assert rows[0]["n_measured"] == int(mask[:, 0].sum())
+    assert np.isfinite(rows[0]["Spearman_rho"])
+
+
+def test_history_records_per_target_rho(synthetic_df, tmp_path):
+    names = tuple(config.TARGET_COLS)
+    res, _ = _train(synthetic_df, tmp_path, target_cols=names, n_targets=3, target_names=names)
+    row = res.history[0]
+    assert set(row["val_rho_per_target"]) == set(names)
+    assert row["val_rho"] == pytest.approx(np.mean(list(row["val_rho_per_target"].values())))
+
+
+def test_history_per_target_single_target(synthetic_df, tmp_path):
+    res, _ = _train(synthetic_df, tmp_path, target_names=["WT_Efficiency"])
+    assert list(res.history[0]["val_rho_per_target"]) == ["WT_Efficiency"]

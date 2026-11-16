@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import copy
 import random
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -99,14 +100,17 @@ def predict(
     return np.concatenate(preds), np.concatenate(trues), np.concatenate(masks)
 
 
-def _rho_per_target(y_pred: np.ndarray, y_true: np.ndarray, mask: np.ndarray) -> list[float]:
-    """Spearman rho per target over measured entries; targets with none are omitted."""
-    rhos = []
+def _rho_per_target(y_pred: np.ndarray, y_true: np.ndarray, mask: np.ndarray) -> dict[int, float]:
+    """Spearman rho per target index over measured entries; targets with none are omitted."""
+    rhos = {}
     for t in range(y_true.shape[1]):
         keep = mask[:, t] == 1.0
         if keep.any():
-            rhos.append(safe_spearman(y_true[keep, t], y_pred[keep, t]))
+            rhos[t] = safe_spearman(y_true[keep, t], y_pred[keep, t])
     return rhos
+
+
+_METRIC_KEYS = ("Pearson_r", "Spearman_rho", "RMSE", "MAE", "R2")
 
 
 def evaluate_split(
@@ -119,15 +123,27 @@ def evaluate_split(
 ) -> list[dict]:
     """Score *model* on a split: one :func:`compute_metrics` dict per target.
 
-    Only measured entries (``mask == 1``) of each target are scored.
+    Only measured entries (``mask == 1``) of each target are scored. Every row
+    carries ``n_measured``. A target with fewer than 2 measured entries cannot be
+    scored: it still gets its row, with NaN metrics and a warning, so a tiny split
+    cannot crash a run at final evaluation.
     """
     y_pred, y_true, mask = predict(model, loader, device)
     rows = []
     for t, name in enumerate(target_names):
         keep = mask[:, t] == 1.0
-        rows.append(
-            compute_metrics(y_true[keep, t], y_pred[keep, t], model_name, split_name, name)
-        )
+        n = int(keep.sum())
+        if n < 2:
+            warnings.warn(
+                f"target {name!r} has {n} measured entries in {split_name}; metrics are NaN",
+                stacklevel=2,
+            )
+            row = {"Target": name, "Model": model_name, "Split": split_name}
+            row.update({k: float("nan") for k in _METRIC_KEYS})
+        else:
+            row = compute_metrics(y_true[keep, t], y_pred[keep, t], model_name, split_name, name)
+        row["n_measured"] = n
+        rows.append(row)
     return rows
 
 
@@ -144,13 +160,19 @@ class TrainResult:
     best_val_rho: float = float("-inf")
 
 
-def _validate(model: nn.Module, loader: DataLoader, device: str) -> tuple[float, float]:
-    """Return ``(masked val loss, mean val rho over targets with measured entries)``."""
+def _validate(
+    model: nn.Module, loader: DataLoader, device: str
+) -> tuple[float, float, dict[int, float]]:
+    """Return ``(masked val loss, mean val rho, per-target rho by index)``.
+
+    The mean is over targets with measured entries only.
+    """
     y_pred, y_true, mask = predict(model, loader, device)
     n = mask.sum()
     loss = float((((y_pred - y_true) ** 2) * mask).sum() / n) if n else 0.0
     rhos = _rho_per_target(y_pred, y_true, mask)
-    return loss, float(np.mean(rhos)) if rhos else 0.0
+    mean = float(np.mean(list(rhos.values()))) if rhos else 0.0
+    return loss, mean, rhos
 
 
 def train_model(
@@ -164,6 +186,7 @@ def train_model(
     patience: int = 10,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     checkpoint_path: str | Path = "best_model.pt",
+    target_names: Sequence[str] | None = None,
     verbose: bool = True,
 ) -> TrainResult:
     """Train with Adam on masked MSE, selecting on mean validation Spearman rho.
@@ -180,6 +203,8 @@ def train_model(
         Yield ``(x, bio, y, mask)``.
     patience : int
         Epochs without improvement before stopping; the LR scheduler uses half.
+    target_names : sequence of str, optional
+        Keys for ``history[i]["val_rho_per_target"]``; defaults to ``t0, t1, ...``.
     verbose : bool
         Print per-epoch progress (turn off for multi-model sweeps).
     """
@@ -207,9 +232,16 @@ def train_model(
             seen += n_measured
 
         train_loss = running / seen if seen else 0.0
-        val_loss, val_rho = _validate(model, val_loader, device)
+        val_loss, val_rho, per_target = _validate(model, val_loader, device)
+        names = target_names or [f"t{i}" for i in range(max(per_target, default=-1) + 1)]
         result.history.append(
-            {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, "val_rho": val_rho}
+            {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "val_rho": val_rho,
+                "val_rho_per_target": {names[t]: r for t, r in per_target.items()},
+            }
         )
         sched.step(val_rho)
 
