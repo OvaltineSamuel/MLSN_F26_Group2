@@ -8,6 +8,7 @@ returns the Figure so the caller can save it.
 from __future__ import annotations
 
 import textwrap
+from collections.abc import Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -29,6 +30,24 @@ __all__ = [
     "plot_vs_paper",
     "set_style",
 ]
+
+
+def _resolve_targets(targets: Sequence[str] | None) -> list[str]:
+    """The target columns a per-enzyme figure draws, in canonical order.
+
+    ``None`` means all of :data:`config.TARGET_COLS`. A name that is not a target column is
+    a ``ValueError`` rather than a silently dropped panel; an empty selection is too, since
+    a figure with no panels is never what anyone meant.
+    """
+    if targets is None:
+        return list(config.TARGET_COLS)
+    wanted = list(targets)
+    unknown = [t for t in wanted if t not in config.TARGET_COLS]
+    if unknown or not wanted:
+        raise ValueError(
+            f"targets must be a non-empty subset of {config.TARGET_COLS}; got {wanted}"
+        )
+    return [t for t in config.TARGET_COLS if t in wanted]
 
 
 def set_style() -> None:
@@ -83,10 +102,16 @@ def plot_pred_vs_actual(
     y_true_by_target: dict[str, np.ndarray],
     y_pred_by_target: dict[str, np.ndarray],
     model_label: str = "Ensemble",
+    targets: Sequence[str] | None = None,
 ) -> plt.Figure:
-    """Hexbin predicted-vs-actual panel, one axis per Cas9 variant."""
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    for ax, tgt in zip(axes, config.TARGET_COLS):
+    """Hexbin predicted-vs-actual panel, one axis per Cas9 variant.
+
+    ``targets`` restricts the panels to those enzymes (default: all three), so a run that
+    models only WT-SpCas9 draws one panel and needs no data for the others.
+    """
+    cols = _resolve_targets(targets)
+    fig, axes = plt.subplots(1, len(cols), figsize=(6 * len(cols), 5), squeeze=False)
+    for ax, tgt in zip(axes[0], cols):
         y_true = np.asarray(y_true_by_target[tgt])
         y_pred = np.asarray(y_pred_by_target[tgt])
         r = pearsonr(y_true, y_pred)[0]
@@ -134,10 +159,12 @@ def plot_feature_importance(
 
 def plot_residuals(
     residuals_by_target: dict[str, np.ndarray],
+    targets: Sequence[str] | None = None,
 ) -> plt.Figure:
-    """Residual (actual - predicted) histograms, one per Cas9 variant."""
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4))
-    for ax, tgt in zip(axes, config.TARGET_COLS):
+    """Residual (actual - predicted) histograms, one per Cas9 variant (or per ``targets``)."""
+    cols = _resolve_targets(targets)
+    fig, axes = plt.subplots(1, len(cols), figsize=(16 / 3 * len(cols), 4), squeeze=False)
+    for ax, tgt in zip(axes[0], cols):
         res = np.asarray(residuals_by_target[tgt])
         sns.histplot(res, bins=50, kde=True, ax=ax, color="#3F51B5")
         ax.axvline(0, color="red", linestyle="--", lw=1.5)
@@ -179,21 +206,28 @@ def _caption(fig: plt.Figure, note: str | None = None) -> None:
     fig.text(0.5, 0.01, caption, ha="center", va="bottom", fontsize=10, style="italic")
 
 
-def plot_vs_paper(scoreboard_df: pd.DataFrame) -> plt.Figure:
+def plot_vs_paper(
+    scoreboard_df: pd.DataFrame, targets: Sequence[str] | None = None
+) -> plt.Figure:
     """Grouped bars, ours vs paper, one panel per enzyme (models with a paper row only).
 
     Our bar carries a +/- s.d. error bar only when a s.d. exists (multi-seed models).
     Paper bars from the article text are solid grey; figure-read approximations are
-    hatched. The comparability caveat is the figure caption.
+    hatched. The comparability caveat is the figure caption. ``targets`` restricts the
+    panels to those enzymes (default: all three).
     """
+    cols = _resolve_targets(targets)
     sb = scoreboard_df[scoreboard_df["Paper_source"] != ""]
     sd = sb["Ours_sd"].fillna(0.0)
     lows = pd.concat([sb["Ours_rho"] - sd, sb["Paper_rho"]])
     highs = pd.concat([sb["Ours_rho"] + sd, sb["Paper_rho"]])
     ylo = min(0.60, float(lows.min()) - 0.02) if len(sb) else 0.60
     yhi = max(0.95, float(highs.max()) + 0.02) if len(sb) else 0.95
-    fig, axes = plt.subplots(1, 3, figsize=(16, 6.5), sharey=True)
-    for ax, tgt in zip(axes, config.TARGET_COLS):
+    fig, axes = plt.subplots(
+        1, len(cols), figsize=(16 / 3 * len(cols), 6.5), sharey=True, squeeze=False
+    )
+    axes = axes[0]
+    for ax, tgt in zip(axes, cols):
         sub = sb[sb["Target"] == tgt].reset_index(drop=True)
         x = np.arange(len(sub))
         w = 0.38
@@ -263,7 +297,9 @@ def plot_training_curves(history_frame: pd.DataFrame) -> plt.Figure:
     return fig
 
 
-def plot_tier_progression(agg: pd.DataFrame, assume_test: bool = False) -> plt.Figure:
+def plot_tier_progression(
+    agg: pd.DataFrame, assume_test: bool = False, targets: Sequence[str] | None = None
+) -> plt.Figure:
     """Best test Spearman rho per tier (Tier 1 -> 2 -> 3 -> extras), one line per enzyme.
 
     Each point is labelled with the winning model, so the reader can see whether a tier
@@ -274,10 +310,12 @@ def plot_tier_progression(agg: pd.DataFrame, assume_test: bool = False) -> plt.F
     maxima over unequal candidate pools, which biases the comparison toward the bigger
     tier. Shipping it bare invited exactly the reading it cannot support.
     """
+    cols = _resolve_targets(targets)
     best = benchmark.tier_best(agg, assume_test)
+    best = best[best["Target"].isin(cols)]
     tiers = [t for t in benchmark.TIERS if t in set(best["Tier"])]
     fig, ax = plt.subplots(figsize=(11, 6))
-    for tgt in config.TARGET_COLS:
+    for tgt in cols:
         sub = best[best["Target"] == tgt].set_index("Tier").reindex(tiers)
         xs = np.arange(len(tiers))
         ax.plot(xs, sub["Ours_rho"], marker="o", lw=2.5, ms=9,

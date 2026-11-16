@@ -510,6 +510,7 @@ def run_tier1(
     *,
     paths: config.Paths,
     force: bool = False,
+    targets: Sequence[str] | None = None,
 ) -> list[dict]:
     """Train every installed Tier-1 model per target, plus the booster mean-ensemble.
 
@@ -524,12 +525,17 @@ def run_tier1(
     ----------
     X : feature matrix aligned row-for-row with *df*.
     feature_names : column names of *X* (only their count is recorded).
+    targets : the target columns to train (default: all of ``config.TARGET_COLS``). Anything
+        that is not a target column, or an empty selection, is a ``ValueError``.
 
     Returns
     -------
     list of dict
         One payload per (model, target), same shape as :func:`run_deep_model`'s.
     """
+    selected = list(config.TARGET_COLS if targets is None else targets)
+    if not selected or any(t not in config.TARGET_COLS for t in selected):
+        raise ValueError(f"targets must be a non-empty subset of {config.TARGET_COLS}")
     paths.results.mkdir(parents=True, exist_ok=True)
     paths.models.mkdir(parents=True, exist_ok=True)
     trainers = models.available_trainers()
@@ -537,7 +543,7 @@ def run_tier1(
     names_blob = chr(10).join(map(str, feature_names)).encode()
     fingerprint = hashlib.sha256(names_blob).hexdigest()[:12]
     results: list[dict] = []
-    for target in config.TARGET_COLS:
+    for target in (t for t in config.TARGET_COLS if t in selected):
         tkey = config.TARGET_KEYS[target]
         # filter_for_target is the single place rows are dropped; "_row" keeps X aligned.
         frame = data.filter_for_target(df.assign(_row=np.arange(len(df))), target)

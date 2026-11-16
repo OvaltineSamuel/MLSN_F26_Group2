@@ -89,9 +89,11 @@ whole run:
 **A reported run needs three edits: `MODE = "full"`, `RUN_TIER3 = True` and
 `RUN_EXTRAS = True`.** The shipped state is the cheap end-to-end check: quick mode with
 the two bio tiers off folds nothing, so *Run all* costs minutes. Turning the bio tiers on
-costs **about 2.5 h of ViennaRNA folding** before the first reported epoch (230,961 folds
-at a measured 38.7 ms/guide — section 6 of the notebook has the arithmetic), whatever
-`MODE` says, because `run_deep_model` folds the enzyme's whole row set regardless.
+costs **ViennaRNA folding time before the first reported epoch**: about **65 min on Colab for
+WT-SpCas9 alone** (the shipped `ENZYMES = ["WT"]`: 55,604 folds at 70 ms/guide measured on a
+Colab A100 instance; 38.7 ms/guide on a desktop core), or **about 4.5 h for all three enzymes plus
+multi-task** (230,961 folds). The GPU does not help: folding is single-threaded CPU code. Section 6
+of the notebook has the arithmetic. This is paid whatever `MODE` says, because `run_deep_model` folds the enzyme's whole row set regardless.
 
 ### One schedule for every deep model
 
@@ -267,9 +269,11 @@ MLSN_F26_Group2/
   ensemble energy and diversity, scaffold integrity, accessibility, plus three
   per-position channels over the 21 positions. Computed **once** and cached;
   the standardizer is fit on **train rows only**.
-  **They are expensive:** measured at 38.7 ms per guide on one desktop core, so
-  the four cache files (230,961 folds for 59,852 distinct guides) are about
-  **2.5 hours** of folding. Section 6 of the notebook shows that arithmetic and
+  **They are expensive:** 70 ms per guide measured on a Colab A100 instance (38.7 ms on a
+  desktop core; the GPU is idle), so WT-SpCas9 alone is about **65 min** and the four cache
+  files (230,961 folds for 59,852 distinct guides) about **4.5 hours**. The notebook's
+  `ENZYMES` setting (shipped `["WT"]`) picks which enzymes are modelled; the multi-task model
+  is skipped automatically unless all three are. Section 6 of the notebook shows that arithmetic and
   skips the pre-warm in quick mode.
 - **Metrics:** test **Spearman ρ** is the headline; Pearson *r*, RMSE, MAE and R²
   alongside. Deep models report **mean ± s.d. over 3 seeds**; a single-seed run

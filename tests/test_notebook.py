@@ -365,7 +365,8 @@ def test_run_deep_model_calls_respect_the_shared_split_guard():
     for node, cell_src in calls:
         kw = {k.arg: ast.unparse(k.value) for k in node.keywords if k.arg}
         assert "target_cols" in kw and "split_col" in kw
-        if "TARGET_COLS" in kw["target_cols"]:  # all three enzymes -> multi-output head
+        # every enzyme in play (ACTIVE_TARGETS, or all of TARGET_COLS) -> multi-output head
+        if "TARGET_COLS" in kw["target_cols"] or "ACTIVE_TARGETS" in kw["target_cols"]:
             saw_multi = True
             assert "SHARED_SPLIT_COL" in kw["split_col"], (
                 "a multi-target run on a per-enzyme split column leaks across enzymes"
@@ -604,3 +605,310 @@ def test_colab_detection_does_not_swallow_an_unrelated_error():
     head = _nb().cells[1].source.split("# [A] GOOGLE COLAB")[0]
     assert "except ModuleNotFoundError" in head
     assert "except Exception" not in head and "except:" not in head
+
+
+# --------------------------------------------------------------------------- #
+# The WT-only switch (ENZYMES -> ACTIVE_TARGETS)
+# --------------------------------------------------------------------------- #
+ENZYME_KEYS = {"WT": "WT_Efficiency", "eSp": "eSpCas9_Efficiency", "HF1": "SpCas9_HF1_Efficiency"}
+
+
+def _cell_with(text: str) -> str:
+    """The one code cell whose source contains `text` (fails if there are none or many)."""
+    hits = [c.source for c in _code_cells(_nb()) if text in c.source]
+    assert len(hits) == 1, f"expected exactly one code cell containing {text!r}, got {len(hits)}"
+    return hits[0]
+
+
+def _cell_function(cell_src: str, name: str) -> str:
+    """Source of the top-level function `name` in a cell, so it can be exec'd on its own."""
+    for node in ast.parse(cell_src).body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return ast.get_source_segment(cell_src, node)
+    raise AssertionError(f"no top-level def {name} in the cell")
+
+
+def _exec_cell_function(cell_src: str, name: str, namespace: dict):
+    code = compile(_cell_function(cell_src, name), f"<notebook {name}>", "exec")
+    exec(code, namespace)  # noqa: S102
+    return namespace[name]
+
+
+def _run_cell(cell_src: str, namespace: dict) -> dict:
+    exec(compile(cell_src, "<notebook cell>", "exec"), namespace)  # noqa: S102
+    return namespace
+
+
+def _resolver():
+    from crispr_deephf import config
+
+    return _exec_cell_function(
+        _cell_with("def resolve_active_targets"), "resolve_active_targets", {"config": config}
+    )
+
+
+def test_enzyme_switch_is_a_code_cell_setting_that_defaults_to_wt_only():
+    assigned = _notebook_assignments(_nb())
+    assert assigned["ENZYMES"] == ["WT"], "the shipped switch must be WT-SpCas9 only"
+    # The switch lives in the settings cell, beside MODE and the RUN_* switches.
+    settings = _cell_with('MODE = "quick"')
+    assert "ENZYMES = " in settings
+    assert "ACTIVE_TARGETS = resolve_active_targets(ENZYMES)" in settings
+    # ...and resolves to the target column, via the real config mapping.
+    assert _resolver()(assigned["ENZYMES"]) == ["WT_Efficiency"]
+
+
+def test_enzyme_keys_the_switch_accepts_are_exactly_the_configs():
+    from crispr_deephf import config
+
+    assert {key: col for col, key in config.TARGET_KEYS.items()} == ENZYME_KEYS
+
+
+@pytest.mark.parametrize(
+    "setting, expected",
+    [
+        (["WT"], ["WT_Efficiency"]),
+        (["HF1"], ["SpCas9_HF1_Efficiency"]),
+        (["HF1", "WT"], ["WT_Efficiency", "SpCas9_HF1_Efficiency"]),  # canonical order
+        (("eSp", "eSp"), ["eSpCas9_Efficiency"]),                      # duplicates collapse
+        (["WT", "eSp", "HF1"], list(ENZYME_KEYS.values())),
+    ],
+)
+def test_enzyme_switch_resolves_keys_to_target_columns(setting, expected):
+    assert _resolver()(setting) == expected
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [["WTT"], ["wt"], ["WT", "Cas12"], [], "WT", None, ["WT_Efficiency"], [1], [["WT"]]],
+)
+def test_enzyme_switch_rejects_anything_that_is_not_a_valid_key_list(bad):
+    """A typo must stop the run, and the error must list the valid keys."""
+    with pytest.raises(ValueError) as err:
+        _resolver()(bad)
+    message = str(err.value)
+    for key in ENZYME_KEYS:
+        assert key in message, f"the error for {bad!r} must list the valid key {key!r}"
+
+
+def test_no_cell_iterates_every_enzyme_except_the_eda_table():
+    """Only cell 15 (the free EDA table) may walk all of config.TARGET_COLS / TARGET_KEYS.
+
+    Read from the AST, so a comment or a printed message that mentions them cannot trip it.
+    A bare lookup such as ``config.TARGET_KEYS[t]`` is fine; a loop or comprehension over the
+    whole mapping is what the switch has to override.
+    """
+    iterating = []
+    for cell in _code_cells(_nb()):
+        tree = ast.parse(cell.source)
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        for node in ast.walk(tree):
+            whole = (
+                isinstance(node, ast.Attribute)
+                and node.attr in ("TARGET_COLS", "TARGET_KEYS")
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "config"
+            )
+            if not whole:
+                continue
+            parent = parents[node]
+            looked_up = isinstance(parent, ast.Subscript) and parent.value is node
+            if looked_up:
+                # config.TARGET_KEYS[...] is a lookup; but TARGET_COLS[0] picks "the first
+                # enzyme", which is not the switch's first.
+                if node.attr == "TARGET_COLS":
+                    iterating.append(ast.unparse(parent))
+                continue
+            if "counts_vs_paper" in cell.source:
+                continue   # cell 15: EDA over all three, labelled "Trained in this run"
+            if "def resolve_active_targets" in cell.source:
+                continue   # cell 5: the one place the keys are mapped onto the columns
+            iterating.append(ast.unparse(parent)[:80])
+    assert not iterating, f"these still ignore the ENZYMES switch: {iterating}"
+
+
+def test_eda_cell_keeps_all_three_enzymes_and_says_which_are_trained():
+    """Cell 15 stays three-enzyme (free, and the paper comparison needs it) but is labelled."""
+    import io
+    from contextlib import redirect_stdout
+
+    import pandas as pd
+
+    from crispr_deephf import config
+
+    cell = _cell_with("counts_vs_paper = pd.DataFrame(rows)")
+    df = pd.DataFrame({t: [0.5, None, 0.2] for t in config.TARGET_COLS})
+    for active in (["WT_Efficiency"], list(config.TARGET_COLS)):
+        ns = {"config": config, "pd": pd, "df": df, "ACTIVE_TARGETS": active,
+              "ACTIVE_LABELS": [config.TARGET_LABELS[t] for t in active], "ENZYMES": ["WT"]}
+        with redirect_stdout(io.StringIO()):
+            _run_cell(cell, ns)
+        table = ns["counts_vs_paper"]
+        assert list(table["Enzyme"]) == [config.TARGET_LABELS[t] for t in config.TARGET_COLS]
+        trained = dict(zip(table["Enzyme"], table["Trained in this run"], strict=True))
+        for t in config.TARGET_COLS:
+            assert trained[config.TARGET_LABELS[t]].startswith("yes" if t in active else "no")
+
+
+def test_bio_prewarm_folds_only_the_active_targets_row_sets(synthetic_df):
+    """Run the cell's own helper: with WT only, only the WT row set is built, never MULTI."""
+    from crispr_deephf import config, data, runner
+
+    df = data.add_shared_split(data.add_split_labels(synthetic_df))
+    ns = {"config": config, "data": data, "runner": runner}
+    helper = _exec_cell_function(_cell_with("def bio_prewarm_frames"), "bio_prewarm_frames", ns)
+
+    wt = helper(df, ["WT_Efficiency"], with_multitask=False)
+    assert list(wt) == ["WT"]
+    assert len(wt["WT"]) == int(df["WT_Efficiency"].notna().sum())
+
+    two = helper(df, ["WT_Efficiency", "SpCas9_HF1_Efficiency"], with_multitask=False)
+    assert list(two) == ["WT", "HF1"]            # eSp is never folded
+
+    everything = helper(df, list(config.TARGET_COLS), with_multitask=True)
+    assert list(everything) == ["WT", "eSp", "HF1", runner.MULTI_KEY]
+    keep = df[config.SHARED_SPLIT_COL].notna() & df[config.TARGET_COLS].notna().any(axis=1)
+    assert len(everything[runner.MULTI_KEY]) == int(keep.sum())
+
+
+def test_bio_prewarm_cell_builds_its_frames_from_the_switch_not_from_all_targets():
+    """The cell must hand the helper ACTIVE_TARGETS and gate MULTI on the multi-task skip."""
+    cell = _cell_with("def bio_prewarm_frames")
+    calls = [
+        n for n in ast.walk(ast.parse(cell))
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id == "bio_prewarm_frames"
+    ]
+    assert len(calls) == 1
+    args = [ast.unparse(a) for a in calls[0].args]
+    assert args[1] == "ACTIVE_TARGETS"
+    assert "MULTITASK_SKIP_REASON" in args[2] and "RUN_EXTRAS" in args[2]
+
+
+def _multitask_namespace(active_targets, *, run_extras=True, vienna=True):
+    from types import SimpleNamespace
+
+    from crispr_deephf import config
+
+    calls = []
+    skip = _exec_cell_function(
+        _cell_with("def multitask_skip_reason"), "multitask_skip_reason",
+        {"ACTIVE_KEYS": [config.TARGET_KEYS[t] for t in active_targets],
+         "MULTITASK_N_TARGETS": 3},
+    )
+    ns = {
+        "config": config,
+        "RUN_EXTRAS": run_extras,
+        "ENZYMES": [config.TARGET_KEYS[t] for t in active_targets],
+        "ACTIVE_TARGETS": list(active_targets),
+        "MULTITASK_MODEL": "MultiTask-BiLSTM+bio",
+        "MULTITASK_SKIP_REASON": skip(active_targets),
+        "bio_features": SimpleNamespace(VIENNA_AVAILABLE=vienna),
+        "runner": SimpleNamespace(run_deep_model=lambda *a, **k: calls.append(k) or [k]),
+        "df": None, "paths": None, "MODE": "quick", "SEEDS": [0], "DEVICE": "cpu",
+        "FORCE_RERUN": False,
+    }
+    return ns, calls
+
+
+def test_multitask_cell_is_skipped_with_a_reason_when_one_enzyme_is_active(capsys):
+    ns, calls = _multitask_namespace(["WT_Efficiency"])
+    _run_cell(_cell_with("multitask_results = []"), ns)
+    out = capsys.readouterr().out
+    assert calls == [], "the multi-task model must not be handed to run_deep_model"
+    assert ns["multitask_results"] == []
+    assert "SKIPPED" in out and "only 1 is selected" in out, "it must say why"
+
+
+def test_multitask_cell_is_skipped_for_a_partial_subset_too(capsys):
+    ns, calls = _multitask_namespace(["WT_Efficiency", "eSpCas9_Efficiency"])
+    _run_cell(_cell_with("multitask_results = []"), ns)
+    out = capsys.readouterr().out
+    assert calls == [] and "SKIPPED" in out and "3 outputs" in out
+
+
+def test_multitask_cell_still_runs_with_all_three_enzymes_on_the_shared_split():
+    from crispr_deephf import config
+
+    ns, calls = _multitask_namespace(list(config.TARGET_COLS))
+    _run_cell(_cell_with("multitask_results = []"), ns)
+    assert len(calls) == 1
+    assert calls[0]["target_cols"] == list(config.TARGET_COLS)
+    assert calls[0]["split_col"] == config.SHARED_SPLIT_COL
+
+
+def test_multitask_cell_does_not_announce_a_skip_when_extras_are_off(capsys):
+    ns, calls = _multitask_namespace(["WT_Efficiency"], run_extras=False)
+    _run_cell(_cell_with("multitask_results = []"), ns)
+    out = capsys.readouterr().out
+    assert calls == [] and "RUN_EXTRAS = False" in out and "SKIPPED" not in out
+
+
+def test_tier1_and_figures_are_handed_the_active_targets():
+    """The package calls that otherwise default to all three enzymes get the switch."""
+    seen = {}
+    for mod, attr, node, _ in _module_calls(_nb()):
+        if (mod, attr) in {
+            ("runner", "run_tier1"), ("plots", "plot_vs_paper"),
+            ("plots", "plot_tier_progression"), ("plots", "plot_pred_vs_actual"),
+            ("plots", "plot_residuals"),
+        }:
+            kw = {k.arg: ast.unparse(k.value) for k in node.keywords if k.arg}
+            seen[attr] = kw.get("targets")
+    assert seen == dict.fromkeys(
+        ("run_tier1", "plot_vs_paper", "plot_tier_progression", "plot_pred_vs_actual",
+         "plot_residuals"),
+        "ACTIVE_TARGETS",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Section 6: the measured Colab cost
+# --------------------------------------------------------------------------- #
+def _bio_cost_cell() -> str:
+    hits = [c.source for c in _nb().cells
+            if c.cell_type == "markdown" and c.source.startswith("## 6. Bio features")]
+    assert len(hits) == 1
+    return hits[0]
+
+
+def test_cost_note_states_both_measurements_with_attribution():
+    import re
+
+    text = _bio_cost_cell()
+    assert re.search(r"Desktop.{0,40}38\.7 ms", text, re.DOTALL)
+    assert re.search(r"Colab A100.{0,60}70 ms", text, re.DOTALL)
+    assert "6,000 guides" in text and "7 minutes" in text
+    assert "1.81x" in text
+    assert "we have not measured one" not in text, "the stale 'not measured' claim must go"
+
+
+def test_cost_note_says_the_gpu_does_not_help():
+    import re
+
+    text = _bio_cost_cell()
+    assert "A100 does not help" in text
+    assert "single-threaded" in text and "CPU-bound" in text
+    assert re.search(r"GPU\s+is\s+not\s+involved.{0,80}idle", text, re.DOTALL)
+    assert "faster GPU tier buys nothing" in text
+
+
+def test_cost_note_arithmetic_is_reproducible():
+    """Every `<ms> ms x <guides> (<label>) = <n> min` line must actually multiply out."""
+    import re
+
+    text = _bio_cost_cell()
+    rows = re.findall(
+        r"^\s*([\d.]+) ms x\s+([\d,]+) \(([^)]*)\)\s*=\s*([\d,]+) min", text, re.MULTILINE
+    )
+    assert len(rows) >= 11, "per-file lines for both machines, plus totals"
+    for ms, guides, label, minutes in rows:
+        got = float(ms) * int(guides.replace(",", "")) / 60_000
+        assert round(got) == int(minutes.replace(",", "")), (label, ms, guides, minutes, got)
+    colab = {label: int(g.replace(",", "")) for ms, g, label, _ in rows if ms == "70"}
+    assert colab["WT only"] == colab["bio_WT"] == 55_604
+    assert colab["all four"] == 230_961 == sum(
+        colab[k] for k in ("bio_WT", "bio_eSp", "bio_HF1", "bio_MULTI")
+    )
+    assert 70 / 38.7 == pytest.approx(1.81, abs=0.005)   # the stated slow-down
+    assert 7 * 60 / 6000 * 1000 == pytest.approx(70)       # the stated measurement

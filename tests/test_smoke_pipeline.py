@@ -245,6 +245,7 @@ def pairing_namespace(tmp_path, synthetic_df):
         "runner": runner,
         "np": np,
         "df": df,
+        "ACTIVE_TARGETS": list(config.TARGET_COLS),
         "saved": runner.load_results(paths.results),
         "split_col_for": lambda t: f"{config.TARGET_KEYS[t]}_split",
     }
@@ -299,3 +300,62 @@ def test_notebook_diagnostics_refuses_a_payload_with_no_ids(pairing_namespace, c
     assert fn("Ridge") == (None, None, None)
     out = capsys.readouterr().out
     assert "REFUSING" in out and "FORCE_RERUN" in out
+
+
+def test_notebook_diagnostics_follows_the_enzyme_switch(pairing_namespace):
+    """With WT only active the helper reads, pairs and returns WT alone."""
+    pairing_namespace["ACTIVE_TARGETS"] = ["WT_Efficiency"]
+    fn = _notebook_pairing_helper(pairing_namespace)
+    y_true, y_pred, seeds = fn("Ridge")
+    assert set(y_true) == set(y_pred) == set(seeds) == {"WT_Efficiency"}
+
+
+# --------------------------------------------------------------------------- #
+# One enzyme end to end: the WT-only switch
+# --------------------------------------------------------------------------- #
+def test_single_enzyme_pipeline_reports_and_plots_only_that_enzyme(tmp_path, synthetic_df):
+    """Tier 1 -> deep -> stack -> scoreboard/best/tier tables -> every figure, WT only."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from crispr_deephf import plots
+
+    wt = ["WT_Efficiency"]
+    paths = config.get_paths(tmp_path)
+    df, X, names = _prepared(synthetic_df)
+    results = runner.run_tier1(df, X, names, paths=paths, targets=wt)
+    assert {r["target"] for r in results} == {"WT"}, "an unselected enzyme was trained"
+    assert not [p for p in paths.results.glob("*.json") if "_eSp_" in p.name or "_HF1_" in p.name]
+    results += runner.run_deep_model(
+        df, model_name="CNN", target_cols=wt, split_col="WT_split", paths=paths,
+        mode=_QUICK, seeds=[0], device="cpu",
+    )
+    stacked = runner.run_stack(
+        runner.load_results(paths.results), df, target_col=wt[0], paths=paths, mode_name="quick"
+    )
+    agg = runner.aggregate(runner.results_frame(results + [stacked]))
+
+    sb = benchmark.scoreboard(agg)
+    assert set(sb["Target"]) == set(wt)
+    assert list(benchmark.best_per_target(agg)["Target"]) == wt
+    assert set(benchmark.tier_best(agg)["Target"]) == set(wt)
+    assert benchmark.format_caveat(1) and benchmark.format_selection_note(len(set(sb["Model"])))
+
+    assert len(plots.plot_vs_paper(sb, targets=wt).axes) == 1
+    assert len(plots.plot_tier_progression(agg, targets=wt).axes) == 1
+    y = df["WT_Efficiency"].dropna().to_numpy()[:50]
+    one_panel = plots.plot_pred_vs_actual({wt[0]: y}, {wt[0]: y[::-1]}, targets=wt)
+    assert len([a for a in one_panel.axes if a.get_xlabel()]) == 1   # (+ a colorbar axis)
+    assert len(plots.plot_residuals({wt[0]: y - y[::-1]}, targets=wt).axes) == 1
+    assert len(plots.plot_vs_paper(sb).axes) == 3  # the default is unchanged
+
+
+def test_run_tier1_and_the_plots_reject_a_target_that_is_not_one():
+    from crispr_deephf import plots
+
+    with pytest.raises(ValueError, match="subset"):
+        plots._resolve_targets(["WT"])           # a key, not a column
+    with pytest.raises(ValueError, match="subset"):
+        plots._resolve_targets([])
+    with pytest.raises(ValueError, match="subset"):
+        runner.run_tier1(None, None, [], paths=None, targets=["nope"])  # type: ignore[arg-type]
