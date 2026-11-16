@@ -133,6 +133,14 @@ def test_bilstm_defaults_match_tuned_keras_architecture():
     assert (cfg.embed_dim, cfg.rnn_hidden, cfg.rnn_merge) == (64, 128, "sum")
 
 
+def test_recurrent_entries_are_single_layer():
+    """The registry must pin the tuned depth, whatever ``ModelConfig`` defaults to."""
+    recurrent = ["LSTM", "BiLSTM", "BiLSTM+bio", "CNN-BiLSTM", "MultiTask-BiLSTM+bio"]
+    depths = {name: architectures.build_model(name).cfg.rnn_layers for name in recurrent}
+    assert depths == dict.fromkeys(recurrent, 1)
+    assert architectures.ModelConfig().rnn_layers == 2  # depth stays available to experiment with
+
+
 def test_bilstm_merge_modes_both_run():
     for merge in ("sum", "concat"):
         model = architectures.build_model("BiLSTM", rnn_merge=merge)

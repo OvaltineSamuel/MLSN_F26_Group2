@@ -76,7 +76,10 @@ class ModelConfig:
         bottleneck down to ``bottleneck_channels``.
     rnn_hidden, rnn_layers, rnn_merge
         Recurrent trunk. ``rnn_merge`` ("sum" or "concat") decides how the final
-        forward and backward states of a bidirectional model are combined.
+        forward and backward states of a bidirectional model are combined. The
+        default ``rnn_layers=2`` is here so depth can be experimented with;
+        every recurrent entry in :data:`MODEL_REGISTRY` pins it back to 1 (see
+        the comment above the registry).
     n_heads, n_transformer_layers
         Transformer encoder shape.
     embed_dim
@@ -274,7 +277,10 @@ class GuideBiLSTM(_GuideRNN):
     hence this model keeps the notebook's own two-by-16 ELU head rather than the
     shared ``hidden_dims`` one -- ``cfg.hidden_dims`` and ``cfg.dropout`` do not
     apply to it. The final ``Dense`` is linear in Keras; here it is followed by
-    the sigmoid every model in this module ends with.
+    the sigmoid every model in this module ends with. Keras stacked a single
+    ``Bidirectional(LSTM(128))``, so every recurrent entry in
+    :data:`MODEL_REGISTRY` pins ``rnn_layers=1``: as registered, this is the
+    tuned single-layer architecture, not a deeper variant of it.
 
     Also recorded from that notebook, so nobody repeats it: the teammate built
     sinusoidal positional encodings and adding them to the tokenised vectors
@@ -468,18 +474,35 @@ class GuideTransformer(nn.Module):
 # --------------------------------------------------------------------------- #
 #: Run name -> (class, ``ModelConfig`` overrides). The run name is what the
 #: notebook, the results table and the saved checkpoints all key on.
+#:
+#: Every recurrent entry pins ``rnn_layers=1`` rather than inheriting the
+#: ``ModelConfig`` default of 2 (which stays, so depth remains easy to
+#: experiment with). Three reasons:
+#:
+#: 1. Fidelity: one layer is the teammate's grid-searched, empirically
+#:    validated architecture. Publishing two layers while citing their tuning
+#:    would misrepresent their work.
+#: 2. Clean comparisons: it holds recurrent depth constant across the tier-2
+#:    comparison and the tier-2-vs-tier-3 ablation. If ``BiLSTM`` were one
+#:    layer and ``BiLSTM+bio`` two, "bio features help" would be confounded
+#:    with "more depth helps" and the ablation would prove nothing.
+#: 3. The paper: the DeepHF RNN row is a single BiLSTM layer, so this is the
+#:    closer reproduction of what we measure ourselves against.
 MODEL_REGISTRY: dict[str, tuple[type[nn.Module], dict[str, object]]] = {
     # Tier 2 -- sequence only.
-    "LSTM": (GuideLSTM, {"use_bio": False}),
-    "BiLSTM": (GuideBiLSTM, {"use_bio": False}),
+    "LSTM": (GuideLSTM, {"use_bio": False, "rnn_layers": 1}),
+    "BiLSTM": (GuideBiLSTM, {"use_bio": False, "rnn_layers": 1}),
     "CNN": (GuideCNN, {"use_bio": False}),
     # Tier 3 -- sequence plus biophysical features.
-    "BiLSTM+bio": (GuideBiLSTM, {"use_bio": True}),
+    "BiLSTM+bio": (GuideBiLSTM, {"use_bio": True, "rnn_layers": 1}),
     "CNN+bio": (GuideCNN, {"use_bio": True}),
     # Extras -- beyond the paper.
-    "CNN-BiLSTM": (GuideCNNBiLSTM, {"use_bio": True}),
+    "CNN-BiLSTM": (GuideCNNBiLSTM, {"use_bio": True, "rnn_layers": 1}),
     "Transformer": (GuideTransformer, {"use_bio": True}),
-    "MultiTask-BiLSTM+bio": (GuideBiLSTM, {"use_bio": True, "n_targets": 3}),
+    "MultiTask-BiLSTM+bio": (
+        GuideBiLSTM,
+        {"use_bio": True, "n_targets": 3, "rnn_layers": 1},
+    ),
 }
 
 #: Registry names grouped for the notebook's run switches. Together these three
