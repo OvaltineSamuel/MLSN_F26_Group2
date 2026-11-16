@@ -2,15 +2,16 @@
 
 The notebook ships with tuned defaults, so this module is only imported when the
 team deliberately switches the tuning cell on. Optuna is a guarded optional
-import: without it :data:`OPTUNA_AVAILABLE` is ``False`` and calling
-:func:`search_deep` or :func:`suggest_config` raises a clear ``ImportError``.
+import: without it :data:`OPTUNA_AVAILABLE` is ``False`` and :func:`search_deep` raises a
+clear ``ImportError`` (:func:`suggest_config` just duck-types its ``trial`` argument).
 Importing this module requires torch; the package ``__init__`` does not import
 it.
 
 The search maximises **validation** Spearman rho, never test rho
 -----------------------------------------------------------------
 Every trial is scored on the validation split, and :func:`search_deep` never
-reads, loads or even builds a loader for the test split. Tuning against the
+trains or scores on the test split (it builds no test loader; only the train and val
+loaders reach ``train_model``). Tuning against the
 test set would leak it into the model-selection loop and invalidate every
 number in the final comparison. The test split is only ever touched afterwards,
 once, by :func:`runner.run_deep_model` using the tuned values.
@@ -21,14 +22,23 @@ Adapted from ``cmd_search`` in the team's ``models/Experiments.py`` (not
 modified): the same TPE sampler seed, the same "maximize validation score"
 objective, one throw-away checkpoint per trial that is deleted afterwards, and
 the same rule that a broken trial stops the search loudly instead of being
-swallowed.
+swallowed. Also kept: per-trial ``n_params`` as a user attribute, and the top-5 and
+parameter-importance printouts (importance in a try/except for too few trials).
+
+Differences from their version: no ``--init-seed`` argument (the seed is
+``config.RANDOM_SEED``); ``patience`` is fixed at 10 and ``epochs`` defaults to 20 (theirs
+60); batch size is fixed at 256 rather than searched; the search space is per architecture
+family and adds ``kernel_widths``/RNN/Transformer knobs; the study is in memory unless
+``storage`` is given.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import tempfile
+import warnings
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -70,7 +80,11 @@ _BATCH_SIZE = 256
 _PATIENCE = 10
 
 #: ``ModelConfig`` fields that are tuples; JSON turns them into lists, so they are restored on load.
-_TUPLE_FIELDS = ("kernel_widths", "hidden_dims")
+_TUPLE_FIELDS = tuple(
+    f.name
+    for f in dataclasses.fields(ModelConfig)
+    if isinstance(getattr(ModelConfig(), f.name), tuple)
+)
 
 # Categorical choices are named strings (Optuna stores primitives only) mapped to tuples here.
 _TRAIN_KEYS = ("lr", "weight_decay")
@@ -185,7 +199,11 @@ def search_deep(
     reproduce the same search. Pass ``storage="sqlite:///.../study.db"`` (as the team's
     ``models/Experiments.py:cmd_search`` does) to make the search resumable: finished trials
     persist and a re-run with the same storage continues the study, so a disconnected Colab
-    session loses at most one trial.
+    session loses at most one trial. Two caveats when resuming: the sampler is re-created with
+    ``TPESampler(seed=0)`` (as in the team's code), so during TPE's random start-up phase a
+    resumed run may re-propose configurations already tried; and resuming with a different
+    ``epochs`` or ``device`` mixes incomparable trial values under one study name, so keep
+    them the same.
 
     Parameters
     ----------
@@ -268,6 +286,7 @@ def search_deep(
             )
         finally:
             ckpt.unlink(missing_ok=True)
+        trial.set_user_attr("n_params", sum(p.numel() for p in model.parameters()))
         return result.best_val_rho  # validation Spearman rho, maximised
 
     study = optuna.create_study(
@@ -278,6 +297,24 @@ def search_deep(
         load_if_exists=storage is not None,
     )
     study.optimize(objective, n_trials=n_trials)  # no catch: a broken trial must stop it loudly
+
+    done = [t for t in study.trials if t.value is not None]
+    if not done:
+        raise RuntimeError(
+            f"all {len(study.trials)} trials failed (NaN validation rho). This usually means "
+            "a degenerate learning rate produced a constant predictor, whose Spearman rho "
+            "is undefined; try more epochs or check the data."
+        )
+    print(f"{len(done)}/{len(study.trials)} trials completed")
+    for t in sorted(done, key=lambda t: t.value, reverse=True)[:5]:
+        print(f"  val {t.value:.4f}  params {t.params}")
+    try:
+        with warnings.catch_warnings():  # "too few trials" warns before it fails or equalises
+            warnings.simplefilter("ignore")
+            imp = optuna.importance.get_param_importances(study)
+        print("importance:", {k: round(v, 3) for k, v in imp.items()})
+    except Exception as exc:  # noqa: BLE001 - too few trials to estimate importances
+        print("importance unavailable:", type(exc).__name__)
 
     # best_trial.params holds the raw sampled values (named choices, not tuples), so rebuild
     # the suggest_config dict by replaying the winning trial through a fixed one.

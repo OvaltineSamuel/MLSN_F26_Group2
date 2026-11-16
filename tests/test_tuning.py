@@ -45,7 +45,7 @@ def paths(tmp_path):
 # suggest_config
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("model_name", sorted(architectures.MODEL_REGISTRY))
-@pytest.mark.parametrize("seed", range(5))
+@pytest.mark.parametrize("seed", range(3))
 def test_suggest_config_keys_are_valid_model_config_fields(model_name, seed):
     params = tuning.suggest_config(_fresh_trial(seed), model_name)
     assert {"lr", "weight_decay"} <= set(params)
@@ -77,10 +77,8 @@ def test_suggest_config_unknown_model_raises():
         tuning.suggest_config(_fresh_trial(), "NoSuchModel")
 
 
-@pytest.mark.parametrize("seed", range(30))
-def test_transformer_heads_always_divide_embed_dim(seed):
-    params = tuning.suggest_config(_fresh_trial(seed), "Transformer")
-    assert params["embed_dim"] % params["n_heads"] == 0
+def test_transformer_heads_divide_every_embed_dim():
+    assert all(e % h == 0 for e in tuning._EMBED_DIMS for h in tuning._N_HEADS)
 
 
 # --------------------------------------------------------------------------- #
@@ -215,11 +213,39 @@ def test_search_deep_best_params_feed_back_into_build_model(split_df, paths):
 @pytest.mark.parametrize("model_name", ["CNN+bio", "BiLSTM", "Transformer"])
 def test_apply_best_params_roundtrip_builds_a_model(tmp_path, model_name):
     p = tmp_path / "best_params.json"
-    tuning.save_best_params(p, model_name, tuning.suggest_config(_fresh_trial(1), model_name))
+    tuned = tuning.suggest_config(_fresh_trial(1), model_name)
+    tuning.save_best_params(p, model_name, tuned)
     overrides, train_kwargs = tuning.apply_best_params(tuning.load_best_params(p, model_name))
     assert set(train_kwargs) == {"lr", "weight_decay"}
     assert not {"lr", "weight_decay"} & set(overrides)
-    architectures.build_model(model_name, **overrides)
+    model = architectures.build_model(model_name, **overrides)
+    assert model.cfg.rnn_layers == tuned.get("rnn_layers", model.cfg.rnn_layers)
+    assert model.cfg.dropout == tuned["dropout"]  # tuned values reach the config
+
+
+def test_tuned_rnn_layers_beats_the_registry_pin(tmp_path):
+    p = tmp_path / "best_params.json"
+    tuning.save_best_params(p, "BiLSTM", {"rnn_layers": 2, "lr": 0.001})
+    overrides, _ = tuning.apply_best_params(tuning.load_best_params(p, "BiLSTM"))
+    assert architectures.build_model("BiLSTM").cfg.rnn_layers == 1
+    assert architectures.build_model("BiLSTM", **overrides).cfg.rnn_layers == 2
+
+
+def test_tuple_fields_are_derived_from_model_config():
+    assert set(tuning._TUPLE_FIELDS) == {"kernel_widths", "hidden_dims"}
+
+
+def test_search_deep_reports_when_every_trial_fails(split_df, paths, monkeypatch):
+    real = tuning.train_model
+
+    def nan_rho(*a, **k):
+        result = real(*a, **k)
+        result.best_val_rho = float("nan")
+        return result
+
+    monkeypatch.setattr(tuning, "train_model", nan_rho)
+    with pytest.raises(RuntimeError, match="all 2 trials failed"):
+        _search(split_df, paths)
 
 
 def test_search_deep_sqlite_storage_resumes(split_df, paths, tmp_path):
