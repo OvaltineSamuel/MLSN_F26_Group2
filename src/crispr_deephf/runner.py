@@ -46,6 +46,7 @@ from crispr_deephf.torch_data import build_splits, check_integrity, make_loader
 from crispr_deephf.train_torch import evaluate_split, predict, set_seed, train_model
 
 __all__ = [
+    "SIDECAR_FILES",
     "aggregate",
     "is_result_payload",
     "load_results",
@@ -150,19 +151,41 @@ def is_result_payload(payload: object) -> bool:
     return isinstance(payload, dict) and "model_name" in payload
 
 
+#: File names this project deliberately writes into the results directory that are not run
+#: results. These are skipped silently; any *other* non-result JSON object is warned about.
+SIDECAR_FILES = frozenset({"best_params.json"})
+
+
 def load_results(results_dir: Path) -> list[dict]:
     """Read every valid ``*.json`` result in *results_dir*, in file-name order.
 
     Unreadable or truncated files are skipped with a warning rather than raising, so one
-    corrupt file cannot take down a whole report. JSON files that are *not* run results
-    (``best_params.json`` and anything else sharing the directory) are skipped silently --
-    they are not corrupt, they are simply not results. See :func:`is_result_payload`.
+    corrupt file cannot take down a whole report.
+
+    A JSON object with no ``model_name`` is not a result (see :func:`is_result_payload`) and
+    is also skipped -- silently for the known sidecars in :data:`SIDECAR_FILES`, which this
+    project writes here on purpose, but **with a warning** for anything else. A result saved
+    by an older schema, or hand-edited, would otherwise disappear from every table and figure
+    with no signal at all.
     """
     results_dir = Path(results_dir)
     if not results_dir.is_dir():
         return []
-    loaded = (_read_result(p) for p in sorted(results_dir.glob("*.json")))
-    return [r for r in loaded if is_result_payload(r)]
+    out: list[dict] = []
+    for path in sorted(results_dir.glob("*.json")):
+        payload = _read_result(path)
+        if payload is None:
+            continue  # already warned about
+        if is_result_payload(payload):
+            out.append(payload)
+        elif path.name not in SIDECAR_FILES:
+            warnings.warn(
+                f"skipping {path.name}: a JSON object with no 'model_name', so it is not a "
+                "run result. If it was meant to be one it will be missing from every table; "
+                "if it is not, move it out of the results directory to silence this.",
+                stacklevel=2,
+            )
+    return out
 
 
 def _reusable(payload: dict | None, *, mode: dict, digest: str, targets: list[str]) -> bool:

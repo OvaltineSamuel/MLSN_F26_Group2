@@ -562,12 +562,30 @@ def test_tuning_best_params_file_is_not_mistaken_for_a_result(tmp_path, paths):
     assert runner.is_result_payload({"model_name": "CNN"})
 
 
-def test_unrelated_json_in_the_results_dir_is_skipped_quietly(tmp_path):
-    """A JSON object that is simply not a result is not corrupt, so it must not warn."""
+def test_known_sidecar_is_skipped_without_a_warning(tmp_path):
+    """The sidecars this project writes on purpose are expected, so they must stay quiet."""
     runner.save_result(tmp_path, "CNN__WT__seed0", {"model_name": "CNN"})
-    (tmp_path / "notes.json").write_text('{"todo": "rerun eSp"}', encoding="utf-8")
+    for name in runner.SIDECAR_FILES:
+        (tmp_path / name).write_text('{"CNN": {"lr": 0.001}}', encoding="utf-8")
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
+        loaded = runner.load_results(tmp_path)
+    assert [r["model_name"] for r in loaded] == ["CNN"]
+
+
+def test_non_result_json_warns_instead_of_vanishing(tmp_path):
+    """Dropping an unrecognised JSON object silently would hide a malformed result.
+
+    A payload written by an older schema, or hand-edited, must not disappear from every
+    table and figure without a word.
+    """
+    runner.save_result(tmp_path, "CNN__WT__seed0", {"model_name": "CNN"})
+    (tmp_path / "old_schema__WT__seed0.json").write_text(
+        '{"name": "CNN", "test": {}}', encoding="utf-8"
+    )
+    assert "old_schema__WT__seed0.json" not in runner.SIDECAR_FILES
+
+    with pytest.warns(UserWarning, match="old_schema__WT__seed0.json"):
         loaded = runner.load_results(tmp_path)
     assert [r["model_name"] for r in loaded] == ["CNN"]

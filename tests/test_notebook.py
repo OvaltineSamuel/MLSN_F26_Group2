@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import importlib.util
 import inspect
 from pathlib import Path
 
@@ -397,18 +398,54 @@ def test_the_signature_check_rebuilds_signatures_correctly():
                 )
 
 
-def test_colab_detection_survives_a_machine_with_no_google_package():
+def _cell1_detect_colab():
+    """Run the setup cell's own detection code and return its ``detect_colab``.
+
+    Only the part of cell 1 above the ``[A] GOOGLE COLAB`` banner is executed, so nothing
+    tries to mount Drive. The function returned is the notebook's, not a copy.
+    """
+    head = _nb().cells[1].source.split("# [A] GOOGLE COLAB")[0]
+    namespace: dict = {}
+    exec(compile(head, "<setup-cell-head>", "exec"), namespace)  # noqa: S102
+    assert isinstance(namespace["IN_COLAB"], bool)
+    return namespace["detect_colab"]
+
+
+@pytest.mark.parametrize(
+    ("spec_result", "expected"),
+    [
+        ("raise", False),  # no `google` package at all: a clean conda env
+        (None, False),  # a `google` namespace package without `colab` (protobuf, Cloud SDK)
+        ("spec", True),  # real Colab
+    ],
+)
+def test_colab_detection_handles_every_find_spec_outcome(monkeypatch, spec_result, expected):
     """The guard that keeps cell 1 from dying locally on ``No module named 'google'``.
 
     ``importlib.util.find_spec("google.colab")`` imports the parent ``google`` package
-    first and raises ModuleNotFoundError when nothing provides it -- the normal state of
-    a clean conda env. Unguarded, the notebook's first cell crashed before printing a
-    single line; this was found by executing it, not by reading it.
+    before it can look inside it, and *raises* ModuleNotFoundError when nothing provides
+    ``google`` -- the normal state of a clean conda env. Unguarded, the notebook's first
+    cell crashed before printing a line; this was found by executing it, not by reading it.
+
+    ``find_spec`` is monkeypatched rather than trusted, so the test proves the guard on
+    every machine. Asserting only that the real call returns a bool would pass vacuously
+    wherever any ``google.*`` distribution happens to be installed -- including on Colab
+    itself, and possibly in CI.
     """
-    src = _nb().cells[1].source
-    head = src.split("# [A] GOOGLE COLAB")[0]
-    namespace: dict = {}
-    # exec is the point: this runs the cell's own detection code, not a copy of it.
-    exec(compile(head, "<setup-cell-head>", "exec"), namespace)  # noqa: S102
-    assert isinstance(namespace["IN_COLAB"], bool)
-    assert namespace["detect_colab"]() is namespace["IN_COLAB"]
+    detect = _cell1_detect_colab()
+
+    def fake_find_spec(name, package=None):
+        assert name == "google.colab"
+        if spec_result == "raise":
+            raise ModuleNotFoundError("No module named 'google'")
+        return object() if spec_result == "spec" else None
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+    assert detect() is expected
+
+
+def test_colab_detection_does_not_swallow_an_unrelated_error():
+    """The guard catches a missing parent package, not every failure in the lookup."""
+    head = _nb().cells[1].source.split("# [A] GOOGLE COLAB")[0]
+    assert "except ModuleNotFoundError" in head
+    assert "except Exception" not in head and "except:" not in head

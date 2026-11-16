@@ -33,7 +33,11 @@ def _prepared(synthetic_df: pd.DataFrame):
 
 
 def test_quick_pipeline_end_to_end(tmp_path, synthetic_df):
-    """Clean -> split -> tier1 -> one deep model -> scoreboard, on synthetic data."""
+    """Split -> features -> tier1 -> one deep model -> scoreboard, on synthetic data.
+
+    The fixture is already clean, so cleaning itself is not in this path; the data contract
+    and PAM repair are covered by ``tests/test_data.py``.
+    """
     paths = config.get_paths(tmp_path)
     df, X, names = _prepared(synthetic_df)
 
@@ -99,14 +103,28 @@ def test_quick_pipeline_stack_and_tier_tables(tmp_path, synthetic_df):
     assert stacked["meta_fit_split"] == "val"
 
     agg = runner.aggregate(runner.results_frame(results + [stacked]))
-    # The stack must reach the tier tables: its run name is "Stack(<tree>+<deep>)",
-    # not the bare "Stack" that benchmark.TIERS lists.
+    stack_name = stacked["model_name"]
+    assert stack_name in set(benchmark.scoreboard(agg)["Model"])
+    assert benchmark.tier_of(stack_name) == "Tier 1"
+
+    # The stack must *reach* the tier tables, not merely be in a tier: its run name is
+    # "Stack(<tree>+<deep>)", not the bare "Stack" that benchmark.TIERS lists, and literal
+    # matching dropped it from tier_best entirely. Restricting the frame to the stack alone
+    # makes the assertion independent of whether it happens to beat the trees on this data.
+    stack_only = benchmark.tier_best(agg[agg["Model"] == stack_name])
+    assert list(stack_only["Tier"]) == ["Tier 1"]
+    assert list(stack_only["Model"]) == [stack_name]
+
     tiers = benchmark.tier_best(agg)
-    assert "Tier 1" in set(tiers["Tier"])
-    assert stacked["model_name"] in set(benchmark.scoreboard(agg)["Model"])
-    assert benchmark.tier_of(stacked["model_name"]) == "Tier 1"
     wt_tier1 = tiers[(tiers["Tier"] == "Tier 1") & (tiers["Target"] == "WT_Efficiency")]
     assert len(wt_tier1) == 1
+    # Whoever wins Tier 1 must be the best of a candidate pool that includes the stack.
+    pool = {m for m in set(agg["Model"]) if benchmark.tier_of(m) == "Tier 1"}
+    assert stack_name in pool
+    wt_test = agg[(agg["Split"] == "Test") & (agg["Target"] == "WT_Efficiency")]
+    candidates = wt_test[wt_test["Model"].isin(pool)]
+    best = candidates.loc[candidates["Spearman_rho_mean"].idxmax(), "Model"]
+    assert wt_tier1["Model"].iloc[0] == best
 
     best = benchmark.best_per_target(agg)
     assert set(best["Target"]) == set(config.TARGET_COLS)
