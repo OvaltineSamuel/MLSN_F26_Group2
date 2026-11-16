@@ -14,6 +14,8 @@ This module must stay torch-free.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 
@@ -69,8 +71,15 @@ def format_caveat() -> str:
 
 
 def _test_rows(agg: pd.DataFrame) -> pd.DataFrame:
-    """Keep only held-out test rows; a frame without ``Split`` is taken as test-only."""
+    """Keep only held-out test rows; a frame without ``Split`` is taken as test-only (warns)."""
     if "Split" not in agg.columns:
+        warnings.warn(
+            "aggregate frame has no 'Split' column; assuming every row is a held-out TEST "
+            "result. runner.results_frame always emits Split, so check this frame is not "
+            "validation data.",
+            UserWarning,
+            stacklevel=3,
+        )
         return agg
     out = agg[agg["Split"] == "Test"]
     if out.empty:

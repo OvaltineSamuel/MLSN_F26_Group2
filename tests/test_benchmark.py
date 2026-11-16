@@ -44,7 +44,8 @@ def test_scoreboard_marks_source_of_paper_number():
                         "Target": [WT] * 3,
                         "Spearman_rho_mean": [0.87, 0.78, 0.86],
                         "Spearman_rho_std": [0.001, 0.0, 0.002], "n_seeds": [3, 1, 3]})
-    sb = benchmark.scoreboard(agg).set_index("Model")
+    with pytest.warns(UserWarning, match="Split"):
+        sb = benchmark.scoreboard(agg).set_index("Model")
     assert sb.loc["BiLSTM+bio", "Paper_rho"] == 0.8670
     assert sb.loc["BiLSTM+bio", "Paper_source"] == "text"
     assert sb.loc["Ridge", "Paper_source"] == "figure (approx)"
@@ -192,3 +193,27 @@ def test_tiers_match_architectures():
     assert benchmark.TIERS["Tier 2"] == architectures.TIER2_MODELS
     assert benchmark.TIERS["Tier 3"] == architectures.TIER3_MODELS
     assert benchmark.TIERS["Extras"] == architectures.EXTRA_MODELS
+
+
+def test_plot_vs_paper_ylim_adapts_to_low_values_and_label_reports_floor():
+    low = _agg([("CNN", HF1, "Test", 0.42, 0.03, 3), ("BiLSTM", HF1, "Test", 0.84, 0.01, 3)])
+    fig = plots.plot_vs_paper(benchmark.scoreboard(low))
+    lo, hi = fig.axes[0].get_ylim()
+    assert lo < 0.42 - 0.03  # lowest bar and its error bar sit inside the frame
+    assert hi >= 0.95
+    label = fig.axes[0].get_ylabel()
+    assert f"{lo:.2f}" in label and "0.60" not in label
+    plt.close(fig)
+
+
+def test_plot_vs_paper_default_window_when_data_is_high(agg):
+    fig = plots.plot_vs_paper(benchmark.scoreboard(agg))
+    lo, hi = fig.axes[0].get_ylim()
+    assert lo == pytest.approx(0.60) and hi == pytest.approx(0.95)
+    plt.close(fig)
+
+
+def test_scoreboard_warns_when_split_column_missing():
+    no_split = _agg([("CNN", WT, "Test", 0.84, 0.01, 3)]).drop(columns="Split")
+    with pytest.warns(UserWarning, match="Split"):
+        benchmark.scoreboard(no_split)

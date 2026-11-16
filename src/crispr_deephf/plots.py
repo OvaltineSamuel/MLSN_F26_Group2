@@ -165,6 +165,11 @@ def plot_vs_paper(scoreboard_df: pd.DataFrame) -> plt.Figure:
     hatched. The comparability caveat is the figure caption.
     """
     sb = scoreboard_df[scoreboard_df["Paper_source"] != ""]
+    sd = sb["Ours_sd"].fillna(0.0)
+    lows = pd.concat([sb["Ours_rho"] - sd, sb["Paper_rho"]])
+    highs = pd.concat([sb["Ours_rho"] + sd, sb["Paper_rho"]])
+    ylo = min(0.60, float(lows.min()) - 0.02) if len(sb) else 0.60
+    yhi = max(0.95, float(highs.max()) + 0.02) if len(sb) else 0.95
     fig, axes = plt.subplots(1, 3, figsize=(16, 6.5), sharey=True)
     for ax, tgt in zip(axes, config.TARGET_COLS):
         sub = sb[sb["Target"] == tgt].reset_index(drop=True)
@@ -180,9 +185,9 @@ def plot_vs_paper(scoreboard_df: pd.DataFrame) -> plt.Figure:
         ax.set_xticks(x)
         ax.set_xticklabels(sub["Model"], rotation=30, ha="right", fontsize=_SLIDE_FONT - 2)
         ax.set_title(config.TARGET_LABELS[tgt], fontsize=_SLIDE_FONT, fontweight="bold")
-        ax.set_ylim(0.6, 0.95)
+        ax.set_ylim(ylo, yhi)
         ax.grid(axis="y", linestyle="--", alpha=0.5)
-    axes[0].set_ylabel("Test Spearman rho (axis starts at 0.60)", fontsize=_SLIDE_FONT)
+    axes[0].set_ylabel(f"Test Spearman rho (axis starts at {ylo:.2f})", fontsize=_SLIDE_FONT)
     fig.legend(
         handles=[
             Patch(facecolor="#bbbbbb", label="Ours (colour = enzyme; ± s.d., none if 1 seed)"),
