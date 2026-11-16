@@ -101,11 +101,15 @@ def predict(
 
 
 def _rho_per_target(y_pred: np.ndarray, y_true: np.ndarray, mask: np.ndarray) -> dict[int, float]:
-    """Spearman rho per target index over measured entries; targets with none are omitted."""
+    """Spearman rho per target index over measured entries.
+
+    Targets with fewer than 2 measured entries are omitted (as in
+    :func:`evaluate_split`): a fake 0.0 would silently drag the selection mean down.
+    """
     rhos = {}
     for t in range(y_true.shape[1]):
         keep = mask[:, t] == 1.0
-        if keep.any():
+        if keep.sum() >= 2:
             rhos[t] = safe_spearman(y_true[keep, t], y_pred[keep, t])
     return rhos
 
@@ -141,6 +145,9 @@ def evaluate_split(
             row = {"Target": name, "Model": model_name, "Split": split_name}
             row.update({k: float("nan") for k in _METRIC_KEYS})
         else:
+            # Deliberately the raw scipy Spearman (NaN if a prediction is constant):
+            # a final score should expose a degenerate model, whereas the training-time
+            # val_rho uses safe_spearman's 0.0 so early stopping never sees NaN.
             row = compute_metrics(y_true[keep, t], y_pred[keep, t], model_name, split_name, name)
         row["n_measured"] = n
         rows.append(row)
@@ -205,9 +212,16 @@ def train_model(
         Epochs without improvement before stopping; the LR scheduler uses half.
     target_names : sequence of str, optional
         Keys for ``history[i]["val_rho_per_target"]``; defaults to ``t0, t1, ...``.
+        Must match the model's number of targets.
     verbose : bool
         Print per-epoch progress (turn off for multi-model sweeps).
     """
+    n_targets = model.cfg.n_targets
+    if target_names is not None and len(target_names) != n_targets:
+        raise ValueError(
+            f"target_names has {len(target_names)} entries but the model has {n_targets} targets"
+        )
+    names = list(target_names) if target_names is not None else [f"t{i}" for i in range(n_targets)]
     model.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -233,7 +247,6 @@ def train_model(
 
         train_loss = running / seen if seen else 0.0
         val_loss, val_rho, per_target = _validate(model, val_loader, device)
-        names = target_names or [f"t{i}" for i in range(max(per_target, default=-1) + 1)]
         result.history.append(
             {
                 "epoch": epoch,

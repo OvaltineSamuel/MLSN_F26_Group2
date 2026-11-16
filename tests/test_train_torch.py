@@ -95,6 +95,8 @@ def _train(
     epochs=2,
     seed=0,
     target_names=None,
+    lr=1e-3,
+    patience=1,
     **overrides,
 ):
     loaders = _loaders(df, list(target_cols))
@@ -105,7 +107,8 @@ def _train(
         loaders["train"],
         loaders["val"],
         epochs=epochs,
-        patience=1,
+        lr=lr,
+        patience=patience,
         device="cpu",
         checkpoint_path=tmp_path / "best.pt",
         target_names=target_names,
@@ -207,3 +210,51 @@ def test_history_records_per_target_rho(synthetic_df, tmp_path):
 def test_history_per_target_single_target(synthetic_df, tmp_path):
     res, _ = _train(synthetic_df, tmp_path, target_names=["WT_Efficiency"])
     assert list(res.history[0]["val_rho_per_target"]) == ["WT_Efficiency"]
+
+
+def test_early_stopping_stops_after_patience(synthetic_df, tmp_path, monkeypatch):
+    # A constant val rho (patched: BatchNorm running stats make even lr=0 drift slightly)
+    # means epoch 1 is the best, epochs 2 and 3 are stale, and stale >= patience (2)
+    # stops the run after epoch 3. A non-strict ">" would never go stale.
+    real_validate = train_torch._validate
+
+    def constant_rho(model, loader, device):
+        loss, _, per_target = real_validate(model, loader, device)
+        return loss, 0.5, per_target
+
+    monkeypatch.setattr(train_torch, "_validate", constant_rho)
+    res, _ = _train(synthetic_df, tmp_path, epochs=10, lr=0.0, patience=2)
+    assert len(res.history) == 3
+    assert res.best_epoch == 1
+
+
+def test_best_weights_restored_when_later_epochs_are_worse(synthetic_df, tmp_path, monkeypatch):
+    snapshots = []
+    rhos = iter([0.9, 0.5, 0.4, 0.3])
+    real_validate = train_torch._validate
+
+    def fake_validate(model, loader, device):
+        snapshots.append({k: v.detach().clone() for k, v in model.state_dict().items()})
+        loss, _, per_target = real_validate(model, loader, device)
+        return loss, next(rhos), per_target
+
+    monkeypatch.setattr(train_torch, "_validate", fake_validate)
+    res, _ = _train(synthetic_df, tmp_path, epochs=4, patience=10)
+    assert res.best_epoch == 1
+    assert res.best_val_rho == pytest.approx(0.9)
+    # training really moved the weights, so "restored" is distinguishable from "last"
+    assert any(not torch.equal(v, snapshots[-1][k]) for k, v in snapshots[0].items())
+    for k, v in res.model.state_dict().items():
+        assert torch.equal(v, snapshots[0][k])
+
+
+def test_target_names_length_mismatch_raises_clear_error(synthetic_df, tmp_path):
+    with pytest.raises(ValueError, match="target_names"):
+        _train(synthetic_df, tmp_path, target_names=["a", "b"])
+
+
+def test_val_rho_ignores_targets_with_fewer_than_two_measured():
+    y_true = np.array([[0.1, 0.5], [0.2, 0.0], [0.3, 0.0]])
+    y_pred = np.array([[0.1, 0.9], [0.2, 0.1], [0.3, 0.2]])
+    mask = np.array([[1.0, 1.0], [1.0, 0.0], [1.0, 0.0]])
+    assert list(train_torch._rho_per_target(y_pred, y_true, mask)) == [0]
