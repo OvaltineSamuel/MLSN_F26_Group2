@@ -19,9 +19,12 @@ Provenance
 ``GuideCNN`` is the team's ``models/CNN.py`` ported structurally unchanged
 (multi-kernel branches, batch norm, a width-3 convolution, a 1x1 bottleneck,
 the PAM-proximal raw one-hot skip, and a separate bio MLP concatenated before
-the head); their explanatory comments are kept inline. ``GuideBiLSTM``
-reproduces the tuned Keras model from ``notebooks/BiLSTM.ipynb``. Neither
-teammate source is modified.
+the head). Their explanatory comments are carried over where the code they
+annotate still lives in one piece; the two that moved with the code they
+describe are the batch-norm suggestion on the shared head (:func:`_make_head`)
+and their multi-output data-leak warning, which is now on
+``ModelConfig.n_targets``. ``GuideBiLSTM`` reproduces the tuned Keras model
+from ``notebooks/BiLSTM.ipynb``. Neither teammate source is modified.
 
 Importing this module requires torch; the package ``__init__`` does not import
 it, so callers import it explicitly.
@@ -95,6 +98,19 @@ class ModelConfig:
     n_targets
         Output width of the head. 1 for a single Cas9 variant, 3 for the
         multi-task model. Nothing else changes between them.
+
+        The team's warning on this field (``models/CNN.py``) still stands and
+        is the reason it defaults to 1: *"head must have one output, because
+        split isn't constant across cas9 variants, so multi-output will cause a
+        data leak"*. With a per-enzyme split column (``WT_split``,
+        ``eSp_split``, ``HF1_split``) each split is drawn independently, so one
+        guide can be WT-**train** and HF1-**test**; a multi-output head trained
+        on that guide's WT-train row has already seen it, and scoring it on the
+        HF1-test row silently inflates the result. Resolution: ``n_targets > 1``
+        is safe **only** on the project's ``shared_split`` column, which assigns
+        one split per guide across all three enzymes (plus the Task 5 mask, so
+        unmeasured targets contribute no loss). Never run a multi-target head
+        against a per-enzyme split column.
     use_bio
         Build the bio branch. ``False`` makes the model sequence-only, and it
         then declares no bio parameters at all.
@@ -174,6 +190,7 @@ def _make_head(in_dim: int, cfg: ModelConfig) -> nn.Sequential:
     layers: list[nn.Module] = []
     for h in cfg.hidden_dims:
         layers += [nn.Linear(in_dim, h), nn.ReLU(), nn.Dropout(cfg.dropout)]
+        # consider adding batch normalization after linear for stability
         in_dim = h
     layers.append(nn.Linear(in_dim, cfg.n_targets))
     return nn.Sequential(*layers)
@@ -499,6 +516,11 @@ MODEL_REGISTRY: dict[str, tuple[type[nn.Module], dict[str, object]]] = {
     # Extras -- beyond the paper.
     "CNN-BiLSTM": (GuideCNNBiLSTM, {"use_bio": True, "rnn_layers": 1}),
     "Transformer": (GuideTransformer, {"use_bio": True}),
+    # The one multi-target entry. Safe *only* on the ``shared_split`` column,
+    # which gives a guide the same split across all three enzymes; on a
+    # per-enzyme split column a guide can be WT-train and HF1-test, and a
+    # 3-output head would train on it and then be scored on it -- the data leak
+    # the team warned about on ``ModelConfig.n_targets`` (see its docstring).
     "MultiTask-BiLSTM+bio": (
         GuideBiLSTM,
         {"use_bio": True, "n_targets": 3, "rnn_layers": 1},

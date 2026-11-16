@@ -12,6 +12,14 @@ from crispr_deephf import architectures, bio_features
 
 REGISTRY_NAMES = list(architectures.MODEL_REGISTRY)
 
+# Derived from the registry, never hardcoded: a name added later is checked too.
+BIO_NAMES = [n for n in REGISTRY_NAMES if architectures.build_model(n).cfg.use_bio]
+RECURRENT_NAMES = [
+    n
+    for n in REGISTRY_NAMES
+    if any(isinstance(m, torch.nn.LSTM) for m in architectures.build_model(n).modules())
+]
+
 
 def _batch(model, n: int = 4):
     """Return ``(x, bio)`` shaped for ``model``; ``bio`` is None for sequence-only models."""
@@ -113,10 +121,17 @@ def test_bio_model_rejects_missing_bio():
         architectures.build_model("CNN+bio")(torch.rand(2, 4, 21), None)
 
 
-@pytest.mark.parametrize("name", ["BiLSTM+bio", "CNN-BiLSTM", "Transformer"])
+@pytest.mark.parametrize("name", BIO_NAMES)
 def test_every_bio_model_rejects_missing_bio(name):
     with pytest.raises(ValueError):
         architectures.build_model(name)(torch.rand(2, 4, 21), None)
+
+
+def test_derived_name_lists_are_not_silently_empty():
+    """Guard the derivations themselves, so a parametrization cannot vacuously pass."""
+    assert len(BIO_NAMES) == 5
+    assert len(RECURRENT_NAMES) == 5
+    assert set(BIO_NAMES) | {"LSTM", "BiLSTM", "CNN"} == set(REGISTRY_NAMES)
 
 
 def test_sequence_only_model_has_no_bio_branch():
@@ -135,10 +150,15 @@ def test_bilstm_defaults_match_tuned_keras_architecture():
 
 def test_recurrent_entries_are_single_layer():
     """The registry must pin the tuned depth, whatever ``ModelConfig`` defaults to."""
-    recurrent = ["LSTM", "BiLSTM", "BiLSTM+bio", "CNN-BiLSTM", "MultiTask-BiLSTM+bio"]
-    depths = {name: architectures.build_model(name).cfg.rnn_layers for name in recurrent}
-    assert depths == dict.fromkeys(recurrent, 1)
+    depths = {name: architectures.build_model(name).cfg.rnn_layers for name in RECURRENT_NAMES}
+    assert depths == dict.fromkeys(RECURRENT_NAMES, 1)
     assert architectures.ModelConfig().rnn_layers == 2  # depth stays available to experiment with
+
+
+def test_caller_overrides_beat_registry_overrides():
+    assert architectures.build_model("BiLSTM", rnn_layers=2).cfg.rnn_layers == 2
+    assert architectures.build_model("BiLSTM", use_bio=True).cfg.use_bio is True
+    assert architectures.build_model("MultiTask-BiLSTM+bio", n_targets=1).cfg.n_targets == 1
 
 
 def test_bilstm_merge_modes_both_run():
@@ -149,9 +169,34 @@ def test_bilstm_merge_modes_both_run():
         architectures.build_model("BiLSTM", rnn_merge="average")
 
 
+@pytest.mark.parametrize(("merge", "factor"), [("sum", 1), ("concat", 2)])
+def test_head_width_follows_merge_mode(merge, factor):
+    """A silent concat would double the hidden width and diverge from merge_mode='sum'."""
+    model = architectures.build_model("BiLSTM", rnn_merge=merge)
+    assert model.head[0].in_features == factor * model.cfg.rnn_hidden
+
+
+def test_sum_merge_adds_the_two_directions():
+    """``rnn_merge='sum'`` must really add the final states, not concatenate them."""
+    cfg = architectures.ModelConfig(rnn_hidden=3, rnn_layers=1)
+    h_n = torch.tensor([[[1.0, 2.0, 3.0]], [[10.0, 20.0, 30.0]]])  # (dirs, N=1, H=3)
+    summed = architectures._final_state(h_n, cfg, bidirectional=True)
+    assert torch.equal(summed, torch.tensor([[11.0, 22.0, 33.0]]))
+    concat_cfg = architectures.ModelConfig(rnn_hidden=3, rnn_layers=1, rnn_merge="concat")
+    concat = architectures._final_state(h_n, concat_cfg, bidirectional=True)
+    assert torch.equal(concat, torch.tensor([[1.0, 2.0, 3.0, 10.0, 20.0, 30.0]]))
+
+
 def test_cnn_pam_proximal_skip_can_be_disabled():
     model = architectures.build_model("CNN", pam_proximal_skip=0)
     assert model(torch.rand(2, 4, 21)).shape == (2, 1)
+
+
+def test_multitask_leak_warning_is_documented():
+    """The team's multi-output leak warning must stay findable from this module."""
+    doc = architectures.ModelConfig.__doc__
+    assert "data leak" in doc
+    assert "shared_split" in doc
 
 
 def test_cnn_matches_team_module_field_names():
