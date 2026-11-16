@@ -364,6 +364,7 @@ def get_split_arrays(
     ids = df["gRNA_ID"].to_numpy()
     out: dict[str, dict[str, np.ndarray]] = {}
     for name in ("train", "val", "test"):
-        pos = np.where(labels == name)[0]
+        # .eq().fillna(False): an in-memory label column holds pd.NA, which breaks ``==``
+        pos = np.flatnonzero(pd.Series(labels).eq(name).fillna(False).to_numpy(dtype=bool))
         out[name] = {"X": X[pos], "y": y[pos], "id": ids[pos]}
     return out

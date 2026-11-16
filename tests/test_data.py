@@ -175,3 +175,16 @@ def test_ensure_raw_excel_truncated_download_is_handled(tmp_path, monkeypatch):
     with pytest.raises(FileNotFoundError):
         data.ensure_raw_excel(paths)
     assert not list(paths.data_raw.glob("*.xlsx"))
+
+
+def test_get_split_arrays_works_on_in_memory_frame_with_pd_na(synthetic_df):
+    # add_split_labels leaves pd.NA in an object column; no CSV round-trip coerces it to NaN.
+    import numpy as np
+
+    df = data.add_split_labels(synthetic_df)
+    X = np.arange(len(df) * 2, dtype=float).reshape(len(df), 2)
+    out = data.get_split_arrays(df, X, "WT_Efficiency")
+    labels = df["WT_split"]
+    for name in ("train", "val", "test"):
+        assert len(out[name]["y"]) == int((labels == name).fillna(False).sum()) > 0
+        assert out[name]["X"].shape[0] == len(out[name]["id"])

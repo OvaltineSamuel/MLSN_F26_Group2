@@ -220,9 +220,10 @@ def run_deep_model(
 ) -> list[dict]:
     """Train one registered architecture on *target_cols*, once per seed, resumably.
 
-    Each seed's result is saved to ``paths.results`` the moment it finishes. A seed whose
-    saved result is readable, was trained with the same mode settings on the same data
-    (same digest) and the same targets is skipped; ``force`` retrains regardless. An
+    Each seed's result is saved to ``paths.results`` the moment it finishes. Resume rule: a
+    seed is skipped only if its saved result is readable AND its recorded mode settings
+    (name, epochs, patience, batch size, lr), data digest and targets ALL equal the current
+    run's -- so a ``quick`` result can never stand in for a ``full`` one; ``force`` retrains regardless. An
     unreadable or stale result file is warned about and retrained.
 
     Single-target runs use :func:`data.filter_for_target` with the per-enzyme split column
@@ -419,20 +420,6 @@ def _tier1_payload(
     }
 
 
-def _split_arrays(frame: pd.DataFrame, X: np.ndarray, target: str, split_col: str) -> dict:
-    """Slice an already-filtered frame and its matching ``X`` rows by the frozen split label.
-
-    Equivalent to :func:`data.get_split_arrays`, but tolerant of ``pd.NA`` labels in an
-    in-memory frame (``==`` on a ``pd.NA`` object column raises; a CSV round-trip hides it).
-    """
-    labels = frame[split_col]
-    out = {}
-    for name in ("train", "val", "test"):
-        pos = np.flatnonzero(labels.eq(name).fillna(False).to_numpy(dtype=bool))
-        out[name] = {"X": X[pos], "y": frame[target].to_numpy(dtype=np.float64)[pos]}
-    return out
-
-
 def run_tier1(
     df: pd.DataFrame,
     X: np.ndarray,
@@ -470,7 +457,7 @@ def run_tier1(
         # filter_for_target is the single place rows are dropped; "_row" keeps X aligned.
         frame = data.filter_for_target(df.assign(_row=np.arange(len(df))), target)
         digest = check_integrity(frame, "21mer", f"{tkey}_split", [target])
-        sp = _split_arrays(frame, X[frame["_row"].to_numpy()], target, f"{tkey}_split")
+        sp = data.get_split_arrays(frame, X[frame["_row"].to_numpy()], target)
         y_val, y_test = sp["val"]["y"], sp["test"]["y"]
         n_feat = len(feature_names)
         per_model: dict[str, dict] = {}
