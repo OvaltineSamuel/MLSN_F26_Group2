@@ -26,10 +26,12 @@ swallowed. Also kept: per-trial ``n_params`` as a user attribute, and the top-5 
 parameter-importance printouts (importance in a try/except for too few trials).
 
 Differences from their version: no ``--init-seed`` argument (the seed is
-``config.RANDOM_SEED``); ``patience`` is fixed at 10 and ``epochs`` defaults to 20 (theirs
-60); batch size is fixed at 256 rather than searched; the search space is per architecture
-family and adds ``kernel_widths``/RNN/Transformer knobs; the study is in memory unless
-``storage`` is given.
+``config.RANDOM_SEED``); ``patience`` is fixed at 10 and ``epochs`` defaults to 20
+(their ``search`` subcommand defaults are ``--epochs 40 --patience 8``; their
+module-wide ``DEFAULTS`` are ``epochs=60, patience=10``); batch size is fixed at 256
+rather than searched; the search space is per architecture family and adds
+``kernel_widths``/RNN/Transformer knobs; the study is in memory unless ``storage`` is
+given.
 """
 
 from __future__ import annotations
@@ -193,8 +195,8 @@ def search_deep(
     """Search hyper-parameters for one single-target deep model, maximising **validation** rho.
 
     Each trial trains a fresh model on the train split and is scored by the best mean
-    **validation** Spearman rho :func:`train_model` reached. The test split is never read
-    here (see the module docstring): tuning on it would make the final comparison
+    **validation** Spearman rho :func:`train_model` reached. The test split is never trained
+    or scored on here (see the module docstring): tuning on it would make the final comparison
     optimistic. The study is in memory and uses a seeded TPE sampler, so the same inputs
     reproduce the same search. Pass ``storage="sqlite:///.../study.db"`` (as the team's
     ``models/Experiments.py:cmd_search`` does) to make the search resumable: finished trials
@@ -256,7 +258,7 @@ def search_deep(
         bio=use_bio,
         cache_path=paths.cache / f"bio_{target_key}" if use_bio else None,
     )
-    # Only train and val are used below. The test split is deliberately never touched.
+    # Only train and val are used below. The test split is deliberately never trained or scored on.
     train_loader = make_loader(
         splits["train"], batch_size=_BATCH_SIZE, shuffle=True, seed=config.RANDOM_SEED
     )
@@ -299,6 +301,8 @@ def search_deep(
     study.optimize(objective, n_trials=n_trials)  # no catch: a broken trial must stop it loudly
 
     done = [t for t in study.trials if t.value is not None]
+    if not study.trials:
+        raise RuntimeError("n_trials produced no trials; pass n_trials >= 1")
     if not done:
         raise RuntimeError(
             f"all {len(study.trials)} trials failed (NaN validation rho). This usually means "

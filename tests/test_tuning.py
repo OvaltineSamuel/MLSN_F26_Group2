@@ -232,7 +232,11 @@ def test_tuned_rnn_layers_beats_the_registry_pin(tmp_path):
 
 
 def test_tuple_fields_are_derived_from_model_config():
-    assert set(tuning._TUPLE_FIELDS) == {"kernel_widths", "hidden_dims"}
+    default = architectures.ModelConfig()
+    expected = {
+        f.name for f in dataclasses.fields(default) if isinstance(getattr(default, f.name), tuple)
+    }
+    assert expected and set(tuning._TUPLE_FIELDS) == expected
 
 
 def test_search_deep_reports_when_every_trial_fails(split_df, paths, monkeypatch):
@@ -246,6 +250,11 @@ def test_search_deep_reports_when_every_trial_fails(split_df, paths, monkeypatch
     monkeypatch.setattr(tuning, "train_model", nan_rho)
     with pytest.raises(RuntimeError, match="all 2 trials failed"):
         _search(split_df, paths)
+
+
+def test_search_deep_zero_trials_has_its_own_message(split_df, paths):
+    with pytest.raises(RuntimeError, match="no trials"):
+        _search(split_df, paths, n_trials=0)
 
 
 def test_search_deep_sqlite_storage_resumes(split_df, paths, tmp_path):
