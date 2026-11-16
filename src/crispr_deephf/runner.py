@@ -25,6 +25,7 @@ Importing this module requires torch; the package ``__init__`` does not import i
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -223,8 +224,8 @@ def run_deep_model(
     Each seed's result is saved to ``paths.results`` the moment it finishes. Resume rule: a
     seed is skipped only if its saved result is readable AND its recorded mode settings
     (name, epochs, patience, batch size, lr), data digest and targets ALL equal the current
-    run's -- so a ``quick`` result can never stand in for a ``full`` one; ``force`` retrains regardless. An
-    unreadable or stale result file is warned about and retrained.
+    run's -- so a ``quick`` result can never stand in for a ``full`` one. ``force`` retrains
+    regardless. An unreadable or stale result file is warned about and retrained.
 
     Single-target runs use :func:`data.filter_for_target` with the per-enzyme split column
     and the strict (no-NaN) integrity check. A multi-target run is only allowed on
@@ -380,6 +381,9 @@ def _train_one(
         payload["predictions"] = {
             "val": predict(model, val_loader, device)[0][:, 0].tolist(),
             "test": predict(model, test_loader, device)[0][:, 0].tolist(),
+            # guide ids in prediction order, so run_stack can prove the alignment
+            "ids_val": [str(i) for i in splits["val"].ids],
+            "ids_test": [str(i) for i in splits["test"].ids],
         }
     save_result(paths.results, key, payload)
     return payload
@@ -392,7 +396,8 @@ def _tier1_payload(
     name: str,
     target: str,
     digest: str,
-    n_features: int,
+    mode: dict,
+    ids: dict[str, list[str]],
     y_val: np.ndarray,
     y_test: np.ndarray,
     p_val: np.ndarray,
@@ -407,7 +412,7 @@ def _tier1_payload(
         "target": config.TARGET_KEYS[target],
         "targets": [target],
         "seed": TIER1_SEED,
-        "mode": {"name": "tier1"},
+        "mode": mode,
         "split_col": split_col,
         "val": _by_target([models.compute_metrics(y_val, p_val, name, "Val", target)]),
         "test": _by_target([models.compute_metrics(y_test, p_test, name, "Test", target)]),
@@ -415,8 +420,12 @@ def _tier1_payload(
         "history": [],
         "duration_s": duration,
         "data_digest": digest,
-        "n_features": n_features,
-        "predictions": {"val": np.asarray(p_val).tolist(), "test": np.asarray(p_test).tolist()},
+        "predictions": {
+            "val": np.asarray(p_val).tolist(),
+            "test": np.asarray(p_test).tolist(),
+            "ids_val": ids["val"],
+            "ids_test": ids["test"],
+        },
     }
 
 
@@ -451,6 +460,8 @@ def run_tier1(
     paths.models.mkdir(parents=True, exist_ok=True)
     trainers = models.available_trainers()
     boosters = [m for m in trainers if m != "Ridge"]
+    names_blob = chr(10).join(map(str, feature_names)).encode()
+    fingerprint = hashlib.sha256(names_blob).hexdigest()[:12]
     results: list[dict] = []
     for target in config.TARGET_COLS:
         tkey = config.TARGET_KEYS[target]
@@ -459,21 +470,28 @@ def run_tier1(
         digest = check_integrity(frame, "21mer", f"{tkey}_split", [target])
         sp = data.get_split_arrays(frame, X[frame["_row"].to_numpy()], target)
         y_val, y_test = sp["val"]["y"], sp["test"]["y"]
-        n_feat = len(feature_names)
+        ids = {s: [str(i) for i in sp[s]["id"]] for s in ("val", "test")}
+        # Resume key beyond the frame digest: the feature set (count + names) must match.
+        tier1_mode = {"name": "tier1", "n_features": len(feature_names), "features": fingerprint}
+        ens_mode = {**tier1_mode, "components": list(boosters)}  # booster set changed -> redo
         per_model: dict[str, dict] = {}
 
         def cached_payload(
-            name: str, tkey: str = tkey, digest: str = digest, target: str = target
+            name: str,
+            mode: dict,
+            tkey: str = tkey,
+            digest: str = digest,
+            target: str = target,
         ) -> dict | None:
             path = paths.results / f"{result_key(name, tkey, TIER1_SEED)}.json"
             if force or not path.exists():
                 return None
             payload = _read_result(path)
-            ok = _reusable(payload, mode={"name": "tier1"}, digest=digest, targets=[target])
+            ok = _reusable(payload, mode=mode, digest=digest, targets=[target])
             return payload if ok else None
 
         for name, trainer in trainers.items():
-            payload = cached_payload(name)
+            payload = cached_payload(name, tier1_mode)
             if payload is None:
                 t0 = time.perf_counter()
                 fitted = trainer(sp["train"]["X"], sp["train"]["y"], sp["val"]["X"], y_val)
@@ -482,7 +500,8 @@ def run_tier1(
                     name,
                     target,
                     digest,
-                    n_feat,
+                    tier1_mode,
+                    ids,
                     y_val,
                     y_test,
                     fitted.predict(sp["val"]["X"]),
@@ -494,7 +513,7 @@ def run_tier1(
             per_model[name] = payload
 
         if len(boosters) >= 2:
-            payload = cached_payload("Ensemble")
+            payload = cached_payload("Ensemble", ens_mode)
             if payload is None:
                 mean = {
                     s: np.mean([per_model[b]["predictions"][s] for b in boosters], axis=0)
@@ -504,7 +523,8 @@ def run_tier1(
                     "Ensemble",
                     target,
                     digest,
-                    n_feat,
+                    ens_mode,
+                    ids,
                     y_val,
                     y_test,
                     mean["val"],
@@ -520,16 +540,24 @@ def run_tier1(
 # --------------------------------------------------------------------------- #
 # Stacking
 # --------------------------------------------------------------------------- #
-def _best_by_val(results: list[dict], family: str, target_col: str) -> list[dict]:
-    """Return the seed-payloads of the *family* model with the best mean **validation** rho."""
-    groups: dict[str, list[dict]] = {}
+def _best_by_val(
+    results: list[dict], family: str, target_col: str, mode_name: str | None = None
+) -> list[dict]:
+    """Return the seed-payloads of the *family* model with the best mean **validation** rho.
+
+    Seeds are pooled only within one ``(model, mode)`` pair, so runs of the same model under
+    different settings (e.g. quick and full) are never averaged together.
+    """
+    groups: dict[tuple, list[dict]] = {}
     for r in results:
         if (
             r.get("family") == family
             and r.get("targets") == [target_col]
             and r.get("predictions") is not None
+            and (mode_name is None or r.get("mode", {}).get("name") == mode_name)
         ):
-            groups.setdefault(r["model_name"], []).append(r)
+            key = (r["model_name"], json.dumps(r.get("mode"), sort_keys=True))
+            groups.setdefault(key, []).append(r)
     if not groups:
         raise ValueError(f"no {family!r} results with predictions for {target_col!r}")
 
@@ -540,7 +568,12 @@ def _best_by_val(results: list[dict], family: str, target_col: str) -> list[dict
 
 
 def run_stack(
-    results: list[dict], df: pd.DataFrame, *, target_col: str, paths: config.Paths
+    results: list[dict],
+    df: pd.DataFrame,
+    *,
+    target_col: str,
+    paths: config.Paths,
+    mode_name: str | None = None,
 ) -> dict:
     """Stack the best tree model and the best deep model with a Ridge meta-learner.
 
@@ -556,6 +589,8 @@ def run_stack(
     results : payloads from :func:`run_tier1` and :func:`run_deep_model`.
     df : the cleaned dataframe (used to recover the validation and test targets).
     target_col : the single target to stack.
+    mode_name : if given (``"quick"``/``"full"``), only deep results of that run mode are
+        considered; seeds are in any case never pooled across different mode settings.
 
     Returns
     -------
@@ -566,10 +601,12 @@ def run_stack(
     ------
     ValueError
         If either family has no results for *target_col*, or the saved predictions do not
-        line up with *df* (different data digest or row count).
+        line up with *df*: different data digest, different row count, or guide ids that
+        differ from the frame's ``gRNA_ID`` in order (so a reordered loader cannot silently
+        pair predictions with the wrong guides).
     """
     tree_runs = _best_by_val(results, "tree", target_col)
-    deep_runs = _best_by_val(results, "deep", target_col)
+    deep_runs = _best_by_val(results, "deep", target_col, mode_name)
     digests = {r["data_digest"] for r in tree_runs + deep_runs}
     split_cols = {r["split_col"] for r in tree_runs + deep_runs}
     if len(digests) != 1 or len(split_cols) != 1:
@@ -583,6 +620,16 @@ def run_stack(
     feats, truth = {}, {}
     for split in ("val", "test"):
         y = frame.loc[labels == split, target_col].to_numpy(dtype=np.float64)
+        want = frame.loc[labels == split, "gRNA_ID"].astype(str).tolist()
+        for r in tree_runs + deep_runs:
+            got = r["predictions"].get(f"ids_{split}")
+            if got != want:
+                raise ValueError(
+                    f"{r['model_name']!r} {split} predictions are not aligned with the "
+                    f"frame's guides (saved ids "
+                    f"{'missing -- rerun with force' if got is None else 'differ in order'}); "
+                    "refusing to stack predictions that may belong to different guides"
+                )
         tree = np.mean([r["predictions"][split] for r in tree_runs], axis=0)
         deep = np.mean([r["predictions"][split] for r in deep_runs], axis=0)
         if not (len(tree) == len(deep) == len(y)):

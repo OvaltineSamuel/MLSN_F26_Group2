@@ -227,6 +227,32 @@ def test_result_from_another_mode_is_not_reused(split_df, paths, monkeypatch):
     assert len(calls) == 1 and payload["mode"]["epochs"] == 2
 
 
+def test_result_on_different_data_is_not_reused(split_df, paths, monkeypatch):
+    _quick_cnn(split_df, paths)
+    other = split_df.copy()
+    other = other.iloc[1:].reset_index(drop=True)  # drop a row: sequences/splits change
+    calls = []
+    real = runner.train_model
+    monkeypatch.setattr(runner, "train_model", lambda *a, **k: calls.append(1) or real(*a, **k))
+    with pytest.warns(UserWarning, match="retraining"):
+        _quick_cnn(other, paths)
+    assert len(calls) == 1
+
+
+def test_result_for_different_targets_is_not_reused(split_df, paths, monkeypatch):
+    _quick_cnn(split_df, paths)
+    path = paths.results / "CNN__WT__seed0.json"
+    saved = json.loads(path.read_text())
+    saved["targets"] = ["eSpCas9_Efficiency"]
+    path.write_text(json.dumps(saved))
+    calls = []
+    real = runner.train_model
+    monkeypatch.setattr(runner, "train_model", lambda *a, **k: calls.append(1) or real(*a, **k))
+    with pytest.warns(UserWarning, match="retraining"):
+        _quick_cnn(split_df, paths)
+    assert len(calls) == 1
+
+
 def test_bilstm_full_mode_uses_grid_searched_hyperparameters():
     s = runner._run_settings("BiLSTM", "full")
     assert (s["lr"], s["batch_size"], s["epochs"]) == (0.0005, 128, 20)
@@ -287,6 +313,37 @@ def test_run_tier1_saves_every_model_and_ensemble_and_resumes(
     assert again == out
 
 
+def test_tier1_reruns_when_the_feature_set_changes(split_df, paths, features, two_boosters):
+    X, names = features
+    first = runner.run_tier1(split_df, X, names, paths=paths)
+    calls = []
+    real = models.train_ridge
+    two_boosters["Ridge"] = lambda *a: calls.append(1) or real(*a)
+    renamed = [f"g{i}" for i in range(len(names))]
+    again = runner.run_tier1(split_df, X, renamed, paths=paths)
+    assert len(calls) == 3  # Ridge retrained for all three targets
+    assert first != again
+
+
+def test_tier1_ensemble_is_rebuilt_when_the_booster_set_changes(
+    split_df, paths, features, two_boosters, monkeypatch
+):
+    X, names = features
+    del two_boosters["XGBoost"]  # only one booster: no ensemble
+    assert not any(r["model_name"] == "Ensemble" for r in runner.run_tier1(
+        split_df, X, names, paths=paths))
+    two_boosters["XGBoost"] = lambda *a: models.train_ridge(*a, alpha=100.0)
+    two_boosters["CatBoost"] = lambda *a: models.train_ridge(*a, alpha=1000.0)
+    out = runner.run_tier1(split_df, X, names, paths=paths)
+    ens = next(r for r in out if r["model_name"] == "Ensemble" and r["target"] == "WT")
+    assert ens["mode"]["components"] == ["LightGBM", "XGBoost", "CatBoost"]
+    # now drop CatBoost again: the 3-model ensemble on disk must not be reused
+    del two_boosters["CatBoost"]
+    out = runner.run_tier1(split_df, X, names, paths=paths)
+    ens = next(r for r in out if r["model_name"] == "Ensemble" and r["target"] == "WT")
+    assert ens["mode"]["components"] == ["LightGBM", "XGBoost"]
+
+
 def test_run_stack_fits_meta_learner_on_validation_not_test(split_df, paths):
     frame = data.filter_for_target(split_df, WT)
     y_val = frame.loc[frame["WT_split"] == "val", WT].to_numpy()
@@ -297,7 +354,10 @@ def test_run_stack_fits_meta_learner_on_validation_not_test(split_df, paths):
         return {
             "model_name": name, "family": family, "targets": [WT], "split_col": "WT_split",
             "data_digest": "abc", "val": {WT: {"Spearman_rho": rho}},
-            "predictions": {"val": list(p_val), "test": list(p_test)},
+            "predictions": {
+                "val": list(p_val), "test": list(p_test),
+                "ids_val": _ids(frame, "val"), "ids_test": _ids(frame, "test"),
+            },
         }  # fmt: skip
 
     # The tree is a perfect predictor on val but *anti*-correlated on test. A meta-learner
@@ -322,7 +382,10 @@ def test_run_stack_chooses_the_best_model_by_validation_rho(split_df, paths):
         return {
             "model_name": name, "family": family, "targets": [WT], "split_col": "WT_split",
             "data_digest": "abc", "val": {WT: {"Spearman_rho": rho}},
-            "predictions": {"val": [0.5] * n_val, "test": [0.5] * n_test},
+            "predictions": {
+                "val": [0.5] * n_val, "test": [0.5] * n_test,
+                "ids_val": _ids(frame, "val"), "ids_test": _ids(frame, "test"),
+            },
         }  # fmt: skip
 
     runs = [
@@ -337,11 +400,75 @@ def test_run_stack_chooses_the_best_model_by_validation_rho(split_df, paths):
     assert out["components"] == ["LightGBM", "BiLSTM"]
 
 
+def _ids(frame, split):
+    return frame.loc[frame["WT_split"] == split, "gRNA_ID"].astype(str).tolist()
+
+
+def _handmade(frame, name, family, rho, *, mode=None, reverse_val_ids=False):
+    n_val = len(_ids(frame, "val"))
+    n_test = len(_ids(frame, "test"))
+    ids_val = _ids(frame, "val")[::-1] if reverse_val_ids else _ids(frame, "val")
+    return {
+        "model_name": name, "family": family, "targets": [WT], "split_col": "WT_split",
+        "data_digest": "abc", "mode": mode or {"name": "quick"},
+        "val": {WT: {"Spearman_rho": rho}},
+        "predictions": {
+            "val": list(np.linspace(0, 1, n_val)), "test": list(np.linspace(0, 1, n_test)),
+            "ids_val": ids_val, "ids_test": _ids(frame, "test"),
+        },
+    }  # fmt: skip
+
+
+def test_run_stack_refuses_predictions_in_a_different_guide_order(split_df, paths):
+    frame = data.filter_for_target(split_df, WT)
+    runs = [
+        _handmade(frame, "LightGBM", "tree", 0.7),
+        _handmade(frame, "CNN", "deep", 0.5, reverse_val_ids=True),  # same length, wrong order
+    ]
+    with pytest.raises(ValueError, match="not aligned"):
+        runner.run_stack(runs, split_df, target_col=WT, paths=paths)
+
+
+def test_run_stack_refuses_results_saved_without_ids(split_df, paths):
+    frame = data.filter_for_target(split_df, WT)
+    runs = [_handmade(frame, "LightGBM", "tree", 0.7), _handmade(frame, "CNN", "deep", 0.5)]
+    del runs[1]["predictions"]["ids_val"]
+    with pytest.raises(ValueError, match="missing"):
+        runner.run_stack(runs, split_df, target_col=WT, paths=paths)
+
+
+def test_run_stack_never_pools_seeds_across_modes(split_df, paths):
+    frame = data.filter_for_target(split_df, WT)
+    quick = {"name": "quick", "epochs": 3}
+    full = {"name": "full", "epochs": 60}
+    runs = [
+        _handmade(frame, "LightGBM", "tree", 0.7, mode={"name": "tier1"}),
+        _handmade(frame, "CNN", "deep", 0.3, mode=quick),
+        _handmade(frame, "CNN", "deep", 0.9, mode=full),
+    ]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # constant-ish predictions; irrelevant here
+        picked = runner._best_by_val(runs, "deep", WT)
+        assert [r["mode"]["name"] for r in picked] == ["full"]  # one group, not an average
+        only_quick = runner._best_by_val(runs, "deep", WT, mode_name="quick")
+    assert [r["mode"]["name"] for r in only_quick] == ["quick"]
+
+
+def test_run_stack_on_real_tier1_and_deep_output(split_df, paths, features, two_boosters):
+    X, names = features
+    tier1 = runner.run_tier1(split_df, X, names, paths=paths)
+    deep = _quick_cnn(split_df, paths)
+    out = runner.run_stack(tier1 + deep, split_df, target_col=WT, paths=paths)
+    assert out["meta_fit_split"] == "val" and np.isfinite(out["test"][WT]["Spearman_rho"])
+    assert out["components"][1] == "CNN"
+
+
 def test_run_stack_rejects_results_from_different_data(split_df, paths):
     def payload(family, digest):
         return {
             "model_name": family, "family": family, "targets": [WT], "split_col": "WT_split",
-            "data_digest": digest, "val": {WT: {"Spearman_rho": 0.5}},
+            "data_digest": digest, "mode": {"name": family},
+            "val": {WT: {"Spearman_rho": 0.5}},
             "predictions": {"val": [0.1], "test": [0.1]},
         }  # fmt: skip
 
