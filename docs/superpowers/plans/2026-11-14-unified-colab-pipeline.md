@@ -628,7 +628,7 @@ git commit -m "feat(runner): resumable multi-seed experiment runner with atomic 
 - Produces:
   - `PAPER_EQUIVALENT: dict[str, str]` — maps our run names to the paper's rows: `{"XGBoost": "XGBoost", "CNN": "CNN", "BiLSTM": "RNN", "BiLSTM+bio": "RNN+biofeature", "Ridge": "Ridge", "Linear": "Linear"}`. Models with no paper counterpart (`CNN+bio`, `CNN-BiLSTM`, `Transformer`, `MultiTask-BiLSTM+bio`, `LightGBM`, `CatBoost`, ensembles) map to nothing and show a blank paper column.
   - `scoreboard(agg: pd.DataFrame) -> pd.DataFrame` — columns `Model`, `Target`, `Ours_rho`, `Ours_sd`, `Paper_rho`, `Paper_source` (`"text"` / `"figure (approx)"` / `""`), `Delta`, `Beats_paper`.
-  - `best_per_target(agg: pd.DataFrame) -> pd.DataFrame` — our best model per enzyme against the paper's best (`RNN+biofeature`).
+  - `best_per_target(agg: pd.DataFrame) -> pd.DataFrame` — our best model per enzyme against the paper's best (`RNN+biofeature`). Columns `Target`, `Best_model`, `Best_has_paper_counterpart`, `Ours_rho`, `Ours_sd`, `Paper_model`, `Paper_rho`, `Delta`, `Ours_best_exceeds_paper_best` — **not** `Beats_paper`, because selecting the best of N models on the test set is not a like-for-like comparison with the paper's single reported model. Carries `format_selection_note(n)` stating that bias.
   - `format_caveat() -> str` — returns `config.PAPER_CAVEAT` for printing under every table and figure.
   - In `plots.py`: `plot_vs_paper(scoreboard_df) -> plt.Figure` — grouped bars, ours vs paper, per enzyme, with error bars from `Ours_sd`, approximations hatched, and the caveat as the figure caption; `plot_training_curves(history_frame) -> plt.Figure`; `plot_tier_progression(agg) -> plt.Figure` — Tier 1 → 2 → 3 → extras, showing whether each tier buys anything.
 
