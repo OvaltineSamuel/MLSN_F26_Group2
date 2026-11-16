@@ -157,9 +157,25 @@ _PAPER_GREY = "#7f7f7f"
 _SLIDE_FONT = 14
 
 
-def _caption(fig: plt.Figure) -> None:
-    """Print the paper-comparability caveat along the bottom of a figure."""
-    caption = "\n".join(textwrap.wrap(benchmark.format_caveat(), 110))
+#: Why the tier-progression figure needs a note of its own: each point is a per-tier
+#: *maximum*, and the tiers do not hold equally many candidates, so the larger pool wins
+#: more often for reasons that have nothing to do with the architecture.
+_TIER_POOL_NOTE = (
+    "Each point is the best (maximum) model in that tier, and the tiers offer unequal "
+    "candidate pools - Tier 1 up to 6 models, Tier 2 three, Tier 3 two - which favours the "
+    "larger pool, so part of any step between tiers is best-of-N selection rather than "
+    "architecture."
+)
+
+
+def _caption(fig: plt.Figure, note: str | None = None) -> None:
+    """Print the paper-comparability caveat, and any extra *note*, along a figure's bottom.
+
+    Each paragraph is wrapped separately: ``textwrap.wrap`` would otherwise collapse the
+    blank line between the caveat and the note into one run-on block.
+    """
+    text = benchmark.format_caveat() if note is None else f"{benchmark.format_caveat()}\n{note}"
+    caption = "\n".join(w for part in text.split("\n") for w in textwrap.wrap(part, 110))
     fig.text(0.5, 0.01, caption, ha="center", va="bottom", fontsize=10, style="italic")
 
 
@@ -252,6 +268,11 @@ def plot_tier_progression(agg: pd.DataFrame, assume_test: bool = False) -> plt.F
 
     Each point is labelled with the winning model, so the reader can see whether a tier
     buys anything over the previous one.
+
+    This is the figure that answers "did Tier 3 earn its complexity?", so it carries the
+    paper-comparability caveat *and* :data:`_TIER_POOL_NOTE`: the points are per-tier
+    maxima over unequal candidate pools, which biases the comparison toward the bigger
+    tier. Shipping it bare invited exactly the reading it cannot support.
     """
     best = benchmark.tier_best(agg, assume_test)
     tiers = [t for t in benchmark.TIERS if t in set(best["Tier"])]
@@ -271,5 +292,6 @@ def plot_tier_progression(agg: pd.DataFrame, assume_test: bool = False) -> plt.F
     ax.set_title("Does each tier buy anything?", fontsize=_SLIDE_FONT + 2, fontweight="bold")
     ax.legend(fontsize=_SLIDE_FONT - 2, loc="lower right")
     ax.grid(alpha=0.4)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0.17, 1, 1))  # leave room for the caption below the axes
+    _caption(fig, note=_TIER_POOL_NOTE)
     return fig

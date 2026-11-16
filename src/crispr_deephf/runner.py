@@ -47,6 +47,7 @@ from crispr_deephf.train_torch import evaluate_split, predict, set_seed, train_m
 
 __all__ = [
     "SIDECAR_FILES",
+    "TUNED_OVERRIDES",
     "aggregate",
     "is_result_payload",
     "load_results",
@@ -69,11 +70,29 @@ METRIC_COLS = ("Pearson_r", "Spearman_rho", "RMSE", "MAE", "R2")
 
 _DEFAULT_LR = 1e-3
 
-#: Per-model overrides of the generic run mode, applied in ``full`` mode only.
-#: ``BiLSTM``: lr, batch size and epochs come from the teammate's completed grid search
-#: in ``notebooks/BiLSTM.ipynb`` (lr {0.0005, 0.001} x batch {64, 128, 256} x epochs
-#: {10, 15, 20}); every other model uses the mode's own values.
-_FULL_MODE_OVERRIDES: dict[str, dict[str, float | int]] = {
+#: Per-model training schedules from a teammate's completed grid search -- **opt-in only**.
+#:
+#: ``BiLSTM``: lr 0.0005, batch 128, 20 epochs, the winner of the grid search in
+#: ``notebooks/BiLSTM.ipynb`` (lr {0.0005, 0.001} x batch {64, 128, 256} x epochs
+#: {10, 15, 20}; best test R2 0.7311).
+#:
+#: :func:`_run_settings` does **not** consult this: no run mode applies it unless a caller
+#: passes it explicitly (``run_deep_model(..., overrides=TUNED_OVERRIDES)``). That is
+#: deliberate. Every deep model otherwise shares one schedule, which is what makes the
+#: tier comparisons controlled: the ``LSTM`` -> ``BiLSTM`` gap is bidirectionality alone and
+#: the ``BiLSTM`` -> ``BiLSTM+bio`` gap is the bio features alone, with recurrent depth
+#: (``rnn_layers=1``, see ``architectures.MODEL_REGISTRY``) *and* the schedule held constant.
+#:
+#: The trade-off, in both directions: using these values makes the Tier-2 ``BiLSTM``
+#: stronger on its own terms, but it breaks schedule-matching with ``LSTM`` and
+#: ``BiLSTM+bio`` -- each of those two deltas would then also contain a 2x lr change, a 2x
+#: batch-size change and a 3x epoch-budget change, so neither ablation would measure what
+#: the notebook says it measures. A result produced with these overrides must therefore be
+#: **reported separately and labelled as tuned**, never mixed into the tier tables. Note
+#: also that the payload records the overridden settings under the same result file name,
+#: so a tuned run replaces the matched-schedule result on disk for that
+#: (model, enzyme, seed).
+TUNED_OVERRIDES: dict[str, dict[str, float | int]] = {
     "BiLSTM": {"lr": 0.0005, "batch_size": 128, "epochs": 20},
 }
 
@@ -208,8 +227,18 @@ def _by_target(rows: list[dict]) -> dict[str, dict]:
 # --------------------------------------------------------------------------- #
 # Deep models
 # --------------------------------------------------------------------------- #
-def _run_settings(model_name: str, mode: str | dict) -> dict:
-    """Return the recorded training settings: mode name, epochs, patience, batch size, lr."""
+def _run_settings(
+    model_name: str, mode: str | dict, overrides: dict[str, dict] | None = None
+) -> dict:
+    """Return the recorded training settings: mode name, epochs, patience, batch size, lr.
+
+    Every model gets the mode's own schedule, so in one mode all deep models train on the
+    same epochs / batch size / lr. Nothing is special-cased by model name: a per-model
+    schedule applies only when the caller hands one over in *overrides* (a
+    ``{model_name: {setting: value}}`` mapping, e.g. :data:`TUNED_OVERRIDES`), and the
+    returned dict -- which is what the payload records and the resume rule compares --
+    then shows the overridden values.
+    """
     if isinstance(mode, str):
         name, base = mode, config.get_mode(mode)
     else:
@@ -217,8 +246,8 @@ def _run_settings(model_name: str, mode: str | dict) -> dict:
         name = next((n for n, m in config.RUN_MODES.items() if m == base), "custom")
     settings = {k: base[k] for k in ("epochs", "patience", "batch_size")}
     settings["lr"] = _DEFAULT_LR
-    if name == "full":
-        settings.update(_FULL_MODE_OVERRIDES.get(model_name, {}))
+    if overrides:
+        settings.update(overrides.get(model_name, {}))
     return {"name": name, **settings}
 
 
@@ -257,6 +286,7 @@ def run_deep_model(
     seeds: Sequence[int],
     device: str,
     force: bool = False,
+    overrides: dict[str, dict] | None = None,
 ) -> list[dict]:
     """Train one registered architecture on *target_cols*, once per seed, resumably.
 
@@ -277,11 +307,16 @@ def run_deep_model(
     target_cols : target column(s); more than one requires ``split_col="shared_split"``.
     split_col : frozen split-label column to read.
     paths : project directories; results go to ``paths.results``, weights to ``paths.models``.
-    mode : ``"quick"`` / ``"full"`` or a settings dict. In ``full`` mode ``BiLSTM`` uses its
-        grid-searched lr, batch size and epochs (see ``_FULL_MODE_OVERRIDES``).
+    mode : ``"quick"`` / ``"full"`` or a settings dict. Every deep model trains on the
+        mode's own epochs, patience, batch size and lr -- no model is special-cased -- so
+        all tier comparisons are schedule-matched by default.
     seeds : model-initialisation seeds; the split is never re-derived.
     device : torch device string.
     force : retrain even if a reusable result exists.
+    overrides : optional ``{model_name: {setting: value}}`` mapping that replaces this
+        model's schedule, e.g. :data:`TUNED_OVERRIDES`. Nothing is overridden unless it is
+        passed here. Using it breaks schedule-matching across models, so such a result must
+        be reported separately and labelled (see :data:`TUNED_OVERRIDES`).
 
     Returns
     -------
@@ -320,7 +355,7 @@ def run_deep_model(
     data.assert_unique_sequences(frame)
     digest = check_integrity(frame, "21mer", split_col, target_cols, allow_missing=multi)
 
-    settings = _run_settings(model_name, mode)
+    settings = _run_settings(model_name, mode, overrides)
     paths.results.mkdir(parents=True, exist_ok=True)
     paths.models.mkdir(parents=True, exist_ok=True)
     splits = None  # built lazily: a fully resumed run never touches the data
@@ -712,28 +747,60 @@ def run_stack(
 # Reporting
 # --------------------------------------------------------------------------- #
 def results_frame(results: list[dict]) -> pd.DataFrame:
-    """Flatten payloads into long-form rows: ``Model, Target, Seed, Split`` + metrics.
+    """Flatten payloads into long-form rows: ``Model, Target, Mode, Seed, Split`` + metrics.
 
     One row per (payload, split, target); ``Split`` is ``"Val"`` or ``"Test"`` and
     ``Target`` the efficiency column (a multi-task run yields one row per target). Payloads
     without a ``test`` mapping are ignored.
+
+    ``Mode`` is the run mode the payload recorded (``"quick"`` / ``"full"`` / ``"tier1"`` /
+    ``"stack"``, or None for a payload with no ``mode``). It is carried because the results
+    directory is a **shared Drive folder**: one teammate smoke-testing in ``quick`` mode
+    while another runs ``full`` otherwise leaves the two indistinguishable in every table,
+    and :func:`aggregate` would pool their seeds into one mean. See the warning there.
     """
     rows = []
     for r in results:
         if not isinstance(r.get("test"), dict):
             continue
+        mode_name = (r.get("mode") or {}).get("name") if isinstance(r.get("mode"), dict) else None
         for split, label in (("val", "Val"), ("test", "Test")):
             for target, metrics in (r.get(split) or {}).items():
                 rows.append(
                     {
                         "Model": r["model_name"],
                         "Target": target,
+                        "Mode": mode_name,
                         "Seed": r.get("seed"),
                         "Split": label,
                         **metrics,
                     }
                 )
     return pd.DataFrame(rows)
+
+
+def _warn_on_mixed_modes(frame: pd.DataFrame, keys: list[str]) -> None:
+    """Warn for every group whose rows come from more than one run mode.
+
+    A ``quick`` seed at rho 0.40 beside two ``full`` seeds at 0.86/0.87 reports
+    ``n_seeds=3, 0.71 +/- 0.27`` and the scoreboard carries it with no signal at all. The
+    results directory is shared by six people, so this is the normal way it happens, not a
+    corner case. :func:`_best_by_val` already refuses to pool modes for the stack; this is
+    the reporting path's equivalent.
+    """
+    if "Mode" not in frame.columns:
+        return
+    for group_key, sub in frame.groupby(keys, sort=True):
+        modes = sorted({str(m) for m in sub["Mode"] if not pd.isna(m)})
+        if len(modes) > 1:
+            model = group_key[0] if isinstance(group_key, tuple) else group_key
+            warnings.warn(
+                f"{model!r} pools seeds from more than one run mode ({', '.join(modes)}) "
+                f"for {dict(zip(keys, group_key, strict=True))}: the mean and s.d. below mix "
+                "runs trained on different budgets and are not a valid summary. Move or "
+                "delete the results of the mode you are not reporting.",
+                stacklevel=3,
+            )
 
 
 def aggregate(frame: pd.DataFrame) -> pd.DataFrame:
@@ -743,9 +810,15 @@ def aggregate(frame: pd.DataFrame) -> pd.DataFrame:
     ``Model, Target, [Split], n_seeds`` followed by ``<Metric>_mean`` and ``<Metric>_std``
     for each metric present (e.g. ``Spearman_rho_mean``). The s.d. is the sample s.d.
     (ddof=1), so it is NaN when ``n_seeds == 1`` (e.g. the deterministic Tier-1 trees).
+
+    Seeds are **not** split by run mode -- the output shape is the contract ``benchmark``
+    reads -- but a group that spans more than one mode raises a :class:`UserWarning` naming
+    the model and the modes, because its mean is then meaningless (see
+    :func:`_warn_on_mixed_modes`).
     """
     keys = ["Model", "Target"] + (["Split"] if "Split" in frame.columns else [])
     metrics = [m for m in METRIC_COLS if m in frame.columns]
+    _warn_on_mixed_modes(frame, keys)
     grouped = frame.groupby(keys, sort=True)
     out = grouped["Seed"].nunique().rename("n_seeds").to_frame()
     for m in metrics:

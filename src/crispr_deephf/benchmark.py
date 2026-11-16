@@ -14,6 +14,8 @@ This module must stay torch-free.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 
@@ -80,9 +82,19 @@ def tier_of(model_name: str) -> str | None:
     return None
 
 
-def format_caveat() -> str:
-    """Return the comparability caveat to print under every table and figure."""
-    return config.PAPER_CAVEAT
+def format_caveat(n_seeds: int | None = None) -> str:
+    """Return the comparability caveat to print under every table and figure.
+
+    Parameters
+    ----------
+    n_seeds : the number of model-init seeds **this run actually has**. When given it is
+        appended as ``(this run: N seed(s))``. :data:`config.PAPER_CAVEAT` no longer claims
+        a count of its own, so passing the real one is how the caveat stays true in
+        ``quick`` mode (1 seed) as well as in ``full`` mode (3).
+    """
+    if n_seeds is None:
+        return config.PAPER_CAVEAT
+    return f"{config.PAPER_CAVEAT} (this run: {int(n_seeds)} seed(s))"
 
 
 def format_selection_note(n_candidates: int | None = None) -> str:
@@ -213,10 +225,24 @@ def tier_best(agg: pd.DataFrame, assume_test: bool = False) -> pd.DataFrame:
     """Best test model per tier and enzyme: ``Tier, Target, Model, Ours_rho``.
 
     Tier membership is resolved with :func:`tier_of`, so a generated ``Stack(...)`` name
-    counts as Tier 1. A model in no tier is simply absent.
+    counts as Tier 1. A model in no tier cannot be placed on a tier axis and is left out of
+    the table and the figure -- but **never silently**: it raises a :class:`UserWarning`
+    naming it. That failure already happened once (the stack was absent from every tier
+    table, found by executing the notebook), and special-casing the ``Stack(`` prefix
+    repaired that instance without protecting the next new model name.
     """
     test = _test_rows(agg, assume_test)
     tiers = test["Model"].map(tier_of)
+    # pandas turns the None that tier_of returns into NaN inside the mapped Series, so this
+    # asks pd.isna rather than `is None` -- `is None` never matched and never warned.
+    untiered = sorted({str(m) for m, t in zip(test["Model"], tiers, strict=True) if pd.isna(t)})
+    if untiered:
+        warnings.warn(
+            f"not in any tier of benchmark.TIERS, so dropped from the tier table and the "
+            f"tier-progression figure: {', '.join(untiered)}. Add the model to TIERS (and to "
+            "the matching architectures list) so it appears.",
+            stacklevel=2,
+        )
     rows = []
     for tier in TIERS:
         for target in config.TARGET_COLS:

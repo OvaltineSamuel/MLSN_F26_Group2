@@ -110,9 +110,15 @@ PAPER_SPEARMAN_APPROX: dict[str, dict[str, float]] = {
 }
 
 #: Comparability caveat to show wherever our numbers are set against the paper.
+#:
+#: It deliberately does **not** state a seed count: this text used to say "averaged over 3
+#: model-init seeds" unconditionally, which described a method that was not used whenever the
+#: notebook ran in ``quick`` mode (1 seed) -- printed right beside a table reading
+#: ``± n/a``. The real count is appended by :func:`benchmark.format_caveat`, which takes it
+#: from the results actually on disk.
 PAPER_CAVEAT = (
     "The paper reports mean ± s.d. over tenfold shuffled validation (n=10); "
-    "we report a single fixed split (seed 42) averaged over 3 model-init seeds, "
+    "we report a single fixed split (seed 42) averaged over model-init seeds, "
     "so the two are not a like-for-like significance test."
 )
 

@@ -21,6 +21,9 @@ raises on degenerate input.
 from __future__ import annotations
 
 import hashlib
+import os
+import tempfile
+import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -291,8 +294,15 @@ def bio_matrix(
                         if verbose:
                             print(f"loaded cached bio features from {path}")
                         return cached["glob"], cached["chans"]
-            except (OSError, ValueError, KeyError):
-                pass  # unreadable or malformed cache: recompute and overwrite
+            # A half-written .npz does not raise OSError/ValueError: a truncated zip
+            # raises zipfile.BadZipFile (which subclasses Exception directly) and a
+            # zero-byte file raises EOFError. Both were reproduced; neither was caught,
+            # so a cache damaged by a killed Colab session took the whole run down
+            # instead of being recomputed.
+            except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile):
+                if verbose:
+                    print(f"unreadable bio-feature cache at {path}: recomputing")
+                # fall through: recompute and overwrite below
 
     glob = np.zeros((len(seqs), len(GLOBAL_FEATURE_NAMES)), dtype=np.float32)
     chans = np.zeros((len(seqs), len(POSITIONAL_CHANNEL_NAMES), SEQ_LEN), dtype=np.float32)
@@ -301,10 +311,33 @@ def bio_matrix(
         if verbose and (i + 1) % 2000 == 0:
             print(f"bio features: {i + 1}/{len(seqs)}")
     if path is not None:
-        np.savez_compressed(path, glob=glob, chans=chans, digest=np.array(digest))
+        _save_cache_atomically(path, glob=glob, chans=chans, digest=digest)
         if verbose:
             print(f"saved bio features to {path}")
     return glob, chans
+
+
+def _save_cache_atomically(path: Path, *, glob: np.ndarray, chans: np.ndarray, digest: str) -> None:
+    """Write the ``.npz`` cache to a temp file beside *path*, then :func:`os.replace` it.
+
+    This is the project's one expensive artifact (~37 min of folding per file) and it is
+    written to a shared Drive folder, so a session killed mid-write must not be able to
+    leave a truncated zip where the next run expects a cache. The temp file is in the
+    **same directory**, which keeps ``os.replace`` on one filesystem and therefore atomic;
+    the same discipline ``runner.save_result``, ``tuning.save_best_params`` and
+    ``data._download_xlsx`` already use. Temp names do not end in ``.npz``.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            np.savez_compressed(fh, glob=glob, chans=chans, digest=np.array(digest))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
 
 def flatten_bio(glob: np.ndarray, chans: np.ndarray) -> np.ndarray:

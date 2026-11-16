@@ -3,9 +3,12 @@
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/OvaltineSamuel/MLSN_F26_Group2/blob/refactor/single-colab-notebook/notebooks/crispr_deephf_pipeline.ipynb)
 
 > **Badge note:** the link above points at the `refactor/single-colab-notebook`
-> branch, because that is where the notebook currently lives. **Change
-> `refactor/single-colab-notebook` to `main` in that URL once this branch is
-> merged** — a badge pointing at `main` would 404 until then.
+> branch, because that is where the notebook currently lives. **Once this branch
+> is merged, change `refactor/single-colab-notebook` to `main` in two places:**
+> that URL, and `REPO_BRANCH` in the notebook's setup cell. A badge pointing at
+> `main` would 404 until then, and the setup cell clones `REPO_BRANCH`
+> explicitly so a pre-merge click does not land on a `main` that has no
+> `crispr_deephf` package.
 
 Predicting the indel (cleavage) efficiency of CRISPR-Cas9 guide RNAs directly
 from sequence, reproducing and extending the **DeepHF** study:
@@ -75,15 +78,41 @@ whole run:
 
 | Switch | Ships as | What it does |
 |---|---|---|
-| `MODE` | `"quick"` | `"quick"` = 3 epochs, 1 seed, patience 2 — an end-to-end smoke test, **never a reported number**. `"full"` = 60 epochs, 3 seeds, patience 10 — the configuration we report. |
+| `MODE` | `"quick"` | `"quick"` = 3 epochs, 1 seed, patience 2 — an end-to-end smoke test, **never a reported number**. `"full"` = 60 epochs, 3 seeds, patience 10 — the configuration we report. Within a mode **every deep model trains on the same schedule**; see *One schedule for every deep model* below. |
 | `RUN_TIER1` | `True` | Ridge / LightGBM / XGBoost / CatBoost / mean-ensemble on the 439 tabular features |
 | `RUN_TIER2` | `True` | LSTM, BiLSTM, CNN (sequence only) |
-| `RUN_TIER3` | `True` | BiLSTM+bio, CNN+bio (sequence + bio features) |
-| `RUN_EXTRAS` | `True` | CNN→BiLSTM, Transformer, multi-task, stacking |
+| `RUN_TIER3` | **`False`** | BiLSTM+bio, CNN+bio (sequence + bio features). Off by default: these need the bio features, and `MODE` does not make them cheap — a *quick* Tier-3 run still folds the enzyme's full row set. |
+| `RUN_EXTRAS` | **`False`** | CNN→BiLSTM, Transformer, multi-task, stacking. Off for the same reason. |
 | `RUN_TUNING` | `False` | Optuna search (section 11). Off on purpose — it is hours of GPU time and its results are **not** applied automatically. |
 | `FORCE_RERUN` | `False` | `True` ignores every saved result and retrains from scratch |
 
-**Changing `MODE` to `"full"` is the only edit a reported run needs.**
+**A reported run needs three edits: `MODE = "full"`, `RUN_TIER3 = True` and
+`RUN_EXTRAS = True`.** The shipped state is the cheap end-to-end check: quick mode with
+the two bio tiers off folds nothing, so *Run all* costs minutes. Turning the bio tiers on
+costs **about 2.5 h of ViennaRNA folding** before the first reported epoch (230,961 folds
+at a measured 38.7 ms/guide — section 6 of the notebook has the arithmetic), whatever
+`MODE` says, because `run_deep_model` folds the enzyme's whole row set regardless.
+
+### One schedule for every deep model
+
+Every deep model in every tier trains on its mode's own epochs, batch size and learning
+rate. No model is special-cased, and that is deliberate: together with the pinned
+`rnn_layers = 1`, it is what makes the tier deltas measurements rather than coincidences —
+`LSTM` → `BiLSTM` is bidirectionality alone, `BiLSTM` → `BiLSTM+bio` is the bio features
+alone. A teammate's grid search (`notebooks/BiLSTM.ipynb`: lr 0.0005, batch 128, 20
+epochs, test R² 0.7311) found a better schedule for `BiLSTM` specifically; it is kept as
+`runner.TUNED_OVERRIDES` and **no run mode applies it**. Passing it
+(`run_deep_model(..., overrides=runner.TUNED_OVERRIDES)`) makes that one model stronger
+but breaks schedule-matching against `LSTM` and `BiLSTM+bio`, so a result produced with it
+must be reported separately and labelled as tuned.
+
+### The executed notebook lives in `notebooks/executed/`
+
+`notebooks/crispr_deephf_pipeline.ipynb` is the clean, unexecuted copy the team edits, and
+the test suite holds it to two contracts: no cell outputs, and the safe shipped switch
+defaults (no `MODE = "full"` in any code cell). The executed copy of the reported
+`MODE = "full"` run — outputs, figures and all — is committed to **`notebooks/executed/`**
+instead, where neither contract applies, so the results commit cannot turn CI red.
 
 ### Resume, not restart
 
@@ -173,7 +202,8 @@ written from the real numbers, never predicted in advance.
 ```
 MLSN_F26_Group2/
 ├── notebooks/
-│   ├── crispr_deephf_pipeline.ipynb   # ← THE notebook: the whole project
+│   ├── crispr_deephf_pipeline.ipynb   # ← THE notebook: the whole project (kept output-free)
+│   ├── executed/                      # the executed MODE="full" copy, with outputs
 │   ├── CNN_Train.ipynb                # teammate's original Colab CNN notebook (kept)
 │   ├── BiLSTM.ipynb                   # teammate's original Keras BiLSTM + grid search (kept)
 │   └── legacy/
@@ -270,7 +300,12 @@ that no sequence leaks across splits, feature shapes, one forward pass per
 registered architecture, the resume/atomic-write behaviour, the scoreboard's
 honesty guards, the Optuna wrapper, and a static contract check on the notebook
 itself (valid `nbformat`, no committed outputs, every call matching the real
-package signature). `tests/test_smoke_pipeline.py` is the end-to-end one:
+package signature). It also pins the invariants the reported numbers rest on:
+every deep model sharing one training schedule per mode, a warning when results
+from two run modes are pooled into one mean, recovery from a truncated or empty
+bio-feature cache, and the diagnostics cell's refusal to pair predictions with
+the dataframe by anything other than guide id.
+`tests/test_smoke_pipeline.py` is the end-to-end one:
 split → features → Tier 1 → a deep model → stack → scoreboard → figures, in
 quick mode, in one test.
 

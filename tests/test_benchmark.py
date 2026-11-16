@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import warnings
 
 import matplotlib
 
@@ -138,6 +139,15 @@ def test_caveat_is_non_empty():
     assert benchmark.format_caveat() == config.PAPER_CAVEAT
 
 
+def test_caveat_reports_the_seed_count_of_this_run():
+    """The caveat used to say "averaged over 3 model-init seeds" even in 1-seed quick mode."""
+    assert "3 model-init seeds" not in config.PAPER_CAVEAT
+    assert benchmark.format_caveat(1).endswith("(this run: 1 seed(s))")
+    assert benchmark.format_caveat(3).endswith("(this run: 3 seed(s))")
+    assert benchmark.format_caveat(3).startswith(config.PAPER_CAVEAT)
+    assert "this run" not in benchmark.format_caveat()  # omitted when nothing is known
+
+
 def test_plot_vs_paper_returns_figure_and_carries_caveat(agg):
     fig = plots.plot_vs_paper(benchmark.scoreboard(agg))
     assert isinstance(fig, plt.Figure)
@@ -179,6 +189,17 @@ def test_plot_tier_progression_returns_figure(agg):
     plt.close(fig)
 
 
+def test_plot_tier_progression_carries_the_caveat_and_the_unequal_pool_note(agg):
+    """It plots per-tier maxima over unequal candidate pools, and it is the slide that
+    answers "did Tier 3 earn its complexity?" -- so both notes must be on the figure."""
+    fig = plots.plot_tier_progression(agg)
+    text = " ".join(t.get_text() for t in fig.texts).replace("\n", " ")
+    assert "tenfold" in text, "the paper-comparability caveat is missing"
+    assert "unequal" in text and "maximum" in text, "the unequal-pool bias is not named"
+    assert "best-of-N" in text
+    plt.close(fig)
+
+
 def test_benchmark_and_plots_do_not_import_torch():
     for mod in (benchmark, plots):
         tree = ast.parse(inspect.getsource(mod))
@@ -192,6 +213,46 @@ def test_tiers_match_architectures():
     assert benchmark.TIERS["Tier 2"] == architectures.TIER2_MODELS
     assert benchmark.TIERS["Tier 3"] == architectures.TIER3_MODELS
     assert benchmark.TIERS["Extras"] == architectures.EXTRA_MODELS
+
+
+def test_tier1_lists_every_model_that_can_produce_a_tier1_result():
+    """Tiers 2, 3 and Extras mirror ``architectures``; Tier 1 had no source of truth at all.
+
+    ``runner.run_tier1`` writes one result per installed trainer plus ``Ensemble``, and
+    ``run_stack`` writes a ``Stack(...)``. Any of those missing from ``TIERS["Tier 1"]``
+    disappears from the tier table and the tier-progression figure -- the failure Task 12
+    found by execution. Only ``tier_of``'s ``Stack(`` prefix match was fixed then, which
+    repaired that one name rather than the class of bug.
+    """
+    models = pytest.importorskip("crispr_deephf.models")
+    produced = set(models.available_trainers()) | {"Ensemble", "Stack"}
+    assert produced <= set(benchmark.TIERS["Tier 1"]), (
+        f"not in TIERS['Tier 1']: {sorted(produced - set(benchmark.TIERS['Tier 1']))}"
+    )
+
+
+def test_tier_of_places_every_tiered_model_and_the_generated_stack_name():
+    for tier, names in benchmark.TIERS.items():
+        for name in names:
+            assert benchmark.tier_of(name) == tier
+    assert benchmark.tier_of("Stack(XGBoost+BiLSTM+bio)") == "Tier 1"
+    assert benchmark.tier_of("SomeNewModel") is None
+
+
+def test_tier_best_warns_about_a_model_in_no_tier():
+    """An untiered model is still dropped -- but it may never be dropped silently."""
+    rows = _agg([("BiLSTM", WT, "Test", 0.85, 0.002, 3), ("Mystery", WT, "Test", 0.91, 0.002, 3)])
+    with pytest.warns(UserWarning, match="not in any tier") as record:
+        out = benchmark.tier_best(rows)
+    assert "Mystery" in str(record[0].message)
+    assert "Mystery" not in set(out["Model"])  # behaviour unchanged: it is still absent
+    assert set(out["Model"]) == {"BiLSTM"}
+
+
+def test_tier_best_is_silent_when_every_model_is_tiered(agg):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert not benchmark.tier_best(agg).empty
 
 
 def test_plot_vs_paper_ylim_adapts_to_low_values_and_label_reports_floor():

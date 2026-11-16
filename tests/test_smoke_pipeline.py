@@ -12,7 +12,9 @@ test that fails for the wrong reason.
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -206,3 +208,94 @@ def test_results_frame_is_empty_without_results(tmp_path):
     long = runner.results_frame([])
     assert long.empty
     assert isinstance(long, pd.DataFrame)
+
+
+# --------------------------------------------------------------------------- #
+# Section 12e: predictions are paired with the dataframe by guide id
+# --------------------------------------------------------------------------- #
+def _notebook_pairing_helper(namespace: dict):
+    """Exec only the section-12e helper *definition* from the notebook and return it.
+
+    The function is run as the notebook defines it rather than re-implemented here, so this
+    test cannot pass against a copy that has drifted from the cell the team actually runs.
+    Everything below the definition (the plotting and saving) is cut off.
+    """
+    nbformat = pytest.importorskip("nbformat")
+    path = Path(__file__).resolve().parents[1] / "notebooks" / "crispr_deephf_pipeline.ipynb"
+    nb = nbformat.read(path, as_version=4)
+    src = next(
+        c.source
+        for c in nb.cells
+        if c.cell_type == "code" and "def saved_test_predictions" in c.source
+    )
+    head = src.split("y_true, y_pred, seeds = saved_test_predictions(")[0]
+    exec(compile(head, "<notebook section 12e>", "exec"), namespace)  # noqa: S102
+    return namespace["saved_test_predictions"]
+
+
+@pytest.fixture
+def pairing_namespace(tmp_path, synthetic_df):
+    """Tier-1 results on disk plus the globals the notebook's helper closes over."""
+    paths = config.get_paths(tmp_path)
+    df, X, names = _prepared(synthetic_df)
+    runner.run_tier1(df, X, names, paths=paths)
+    return {
+        "config": config,
+        "data": data,
+        "runner": runner,
+        "np": np,
+        "df": df,
+        "saved": runner.load_results(paths.results),
+        "split_col_for": lambda t: f"{config.TARGET_KEYS[t]}_split",
+    }
+
+
+def test_notebook_diagnostics_pairs_predictions_by_guide_id(pairing_namespace):
+    """The happy path: ids match, so the panel gets the frame's own test rows."""
+    fn = _notebook_pairing_helper(pairing_namespace)
+    y_true, y_pred, seeds = fn("Ridge")
+    assert set(y_true) == set(config.TARGET_COLS)
+    assert set(seeds) == set(config.TARGET_COLS)
+    for target in config.TARGET_COLS:
+        frame = data.filter_for_target(pairing_namespace["df"], target)
+        want = frame.loc[frame[f"{config.TARGET_KEYS[target]}_split"] == "test", target]
+        assert len(y_true[target]) == len(y_pred[target]) == len(want)
+        assert y_true[target] == pytest.approx(want.to_numpy())
+
+
+def test_notebook_diagnostics_refuses_reordered_ids(pairing_namespace, capsys):
+    """The hazard: same length, wrong order.
+
+    Zipping predictions against ``frame.loc[labels == "test"]`` positionally is a silent
+    wrong number -- ``plots.plot_pred_vs_actual`` would compute r and rho from the shuffled
+    pairing and print both in the panel titles of a figure saved for the slides. Task 8
+    fixed this class of bug in ``run_stack`` by comparing ids; the cell must do the same.
+    """
+    fn = _notebook_pairing_helper(pairing_namespace)
+    for payload in pairing_namespace["saved"]:
+        if payload["model_name"] == "Ridge" and payload["target"] == "WT":
+            ids = payload["predictions"]["ids_test"]
+            payload["predictions"]["ids_test"] = list(reversed(ids))
+            assert len(payload["predictions"]["ids_test"]) == len(ids)  # length still matches
+    assert fn("Ridge") == (None, None, None)
+    assert "REFUSING" in capsys.readouterr().out
+
+
+def test_notebook_diagnostics_refuses_a_foreign_data_digest(pairing_namespace, capsys):
+    """A payload trained on another dataset must not be plotted against this frame."""
+    fn = _notebook_pairing_helper(pairing_namespace)
+    for payload in pairing_namespace["saved"]:
+        if payload["model_name"] == "Ridge":
+            payload["data_digest"] = "deadbeef1234"
+    assert fn("Ridge") == (None, None, None)
+    assert "different data" in capsys.readouterr().out
+
+
+def test_notebook_diagnostics_refuses_a_payload_with_no_ids(pairing_namespace, capsys):
+    """An older payload saved before ids were recorded must say so, not pair by position."""
+    fn = _notebook_pairing_helper(pairing_namespace)
+    for payload in pairing_namespace["saved"]:
+        payload["predictions"].pop("ids_test", None)
+    assert fn("Ridge") == (None, None, None)
+    out = capsys.readouterr().out
+    assert "REFUSING" in out and "FORCE_RERUN" in out

@@ -253,13 +253,71 @@ def test_result_for_different_targets_is_not_reused(split_df, paths, monkeypatch
     assert len(calls) == 1
 
 
-def test_bilstm_full_mode_uses_grid_searched_hyperparameters():
-    s = runner._run_settings("BiLSTM", "full")
-    assert (s["lr"], s["batch_size"], s["epochs"]) == (0.0005, 128, 20)
-    assert s["patience"] == config.get_mode("full")["patience"]
-    cnn = runner._run_settings("CNN", "full")
-    assert (cnn["lr"], cnn["batch_size"], cnn["epochs"]) == (1e-3, 256, 60)
+@pytest.mark.parametrize("mode", ["quick", "full"])
+def test_every_deep_model_trains_on_one_schedule(mode):
+    """The matched-schedule property both ablations rest on, pinned so it cannot regress.
+
+    ``architectures.MODEL_REGISTRY`` pins ``rnn_layers=1`` everywhere so that "bio features
+    help" is not confounded with "more depth helps". A per-model *schedule* override
+    confounds the very same pairs on a different axis: with ``BiLSTM`` on lr 0.0005 / batch
+    128 / 20 epochs while ``LSTM`` and ``BiLSTM+bio`` ran lr 0.001 / batch 256 / 60 epochs,
+    the LSTM-vs-BiLSTM gap was not bidirectionality alone and the BiLSTM-vs-BiLSTM+bio gap
+    was not the bio features alone. Both are claims the notebook makes in words, so the
+    equality is asserted in code.
+    """
+    schedules = {
+        m: {k: runner._run_settings(m, mode)[k] for k in ("epochs", "batch_size", "lr")}
+        for m in ("LSTM", "BiLSTM", "BiLSTM+bio")
+    }
+    assert schedules["LSTM"] == schedules["BiLSTM"] == schedules["BiLSTM+bio"]
+    expected = config.get_mode(mode)
+    assert schedules["BiLSTM"] == {
+        "epochs": expected["epochs"],
+        "batch_size": expected["batch_size"],
+        "lr": runner._DEFAULT_LR,
+    }
+
+
+def test_no_model_is_special_cased_in_any_mode():
+    """Not one architecture may deviate from its mode's schedule by default."""
+    for mode in ("quick", "full"):
+        base = config.get_mode(mode)
+        for name in architectures.MODEL_REGISTRY:
+            s = runner._run_settings(name, mode)
+            assert (s["epochs"], s["patience"], s["batch_size"], s["lr"]) == (
+                base["epochs"], base["patience"], base["batch_size"], runner._DEFAULT_LR,
+            ), f"{name} deviates from the {mode} schedule without being asked to"
+
+
+def test_tuned_overrides_are_opt_in_only():
+    """The teammate's grid-searched values survive as a constant, applied only on request."""
+    assert runner.TUNED_OVERRIDES["BiLSTM"] == {"lr": 0.0005, "batch_size": 128, "epochs": 20}
+    tuned = runner._run_settings("BiLSTM", "full", runner.TUNED_OVERRIDES)
+    assert (tuned["lr"], tuned["batch_size"], tuned["epochs"]) == (0.0005, 128, 20)
+    assert tuned["patience"] == config.get_mode("full")["patience"]
+    assert tuned["name"] == "full"
+    # a model with no entry is untouched even when overrides are passed
+    assert runner._run_settings("CNN", "full", runner.TUNED_OVERRIDES) == runner._run_settings(
+        "CNN", "full"
+    )
     assert runner._run_settings("BiLSTM", "quick")["epochs"] == 3  # quick stays quick
+
+
+def test_overrides_reach_the_trained_model(split_df, paths, monkeypatch):
+    """``run_deep_model(..., overrides=...)`` must change the schedule actually trained."""
+    seen = {}
+    real = runner.train_model
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "train_model", spy)
+    out = _quick_cnn(split_df, paths, overrides={"CNN": {"lr": 0.007, "epochs": 1}})
+    assert (seen["lr"], seen["epochs"]) == (0.007, 1)
+    assert out[0]["mode"] == {
+        "name": "quick", "epochs": 1, "patience": 2, "batch_size": 256, "lr": 0.007,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -494,7 +552,70 @@ def test_results_frame_is_long_form():
     assert list(frame["Split"]) == ["Val", "Test"]
     assert set(frame["Model"]) == {"CNN"} and set(frame["Target"]) == {WT}
     assert frame.loc[frame["Split"] == "Test", "Spearman_rho"].item() == 0.8
-    assert {"Model", "Target", "Seed", "Split"} <= set(frame.columns)
+    assert {"Model", "Target", "Mode", "Seed", "Split"} <= set(frame.columns)
+    assert frame["Mode"].isna().all()  # the payload above records no mode
+
+
+def test_results_frame_carries_the_run_mode():
+    frame = runner.results_frame([
+        {
+            "model_name": "CNN", "seed": 0, "mode": {"name": "full", "epochs": 60},
+            "test": {WT: {"Spearman_rho": 0.86}},
+        },
+        {
+            "model_name": "Ridge", "seed": 0, "mode": {"name": "tier1"},
+            "test": {WT: {"Spearman_rho": 0.78}},
+        },
+    ])  # fmt: skip
+    assert dict(zip(frame["Model"], frame["Mode"], strict=True)) == {
+        "CNN": "full",
+        "Ridge": "tier1",
+    }
+
+
+def _mixed_mode_frame() -> pd.DataFrame:
+    """One quick seed and two full seeds of the same model, as a shared results dir yields."""
+    return runner.results_frame([
+        {"model_name": "BiLSTM", "seed": 0, "mode": {"name": "quick"},
+         "test": {WT: {"Spearman_rho": 0.40}}},
+        {"model_name": "BiLSTM", "seed": 1, "mode": {"name": "full"},
+         "test": {WT: {"Spearman_rho": 0.86}}},
+        {"model_name": "BiLSTM", "seed": 2, "mode": {"name": "full"},
+         "test": {WT: {"Spearman_rho": 0.87}}},
+    ])  # fmt: skip
+
+
+def test_aggregate_warns_when_a_group_spans_run_modes():
+    """The reviewer's reproduction: 0.40 (quick) + 0.86/0.87 (full) -> 0.71 +/- 0.27, silently.
+
+    The results directory is a shared Drive folder for six people, so one teammate
+    smoke-testing while another runs full is the normal way this happens.
+    """
+    frame = _mixed_mode_frame()
+    with pytest.warns(UserWarning, match="more than one run mode") as record:
+        agg = runner.aggregate(frame)
+    message = str(record[0].message)
+    assert "BiLSTM" in message and "quick" in message and "full" in message
+    # the pooled number is still produced (shape is the benchmark contract), but now flagged
+    assert agg.loc[0, "n_seeds"] == 3
+    assert agg.loc[0, "Spearman_rho_mean"] == pytest.approx(0.71)
+
+
+def test_aggregate_is_silent_for_a_single_mode():
+    frame = _mixed_mode_frame()
+    frame["Mode"] = "full"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        agg = runner.aggregate(frame)
+    assert agg.loc[0, "n_seeds"] == 3
+
+
+def test_aggregate_is_silent_without_a_mode_column():
+    """A hand-built frame with no Mode column must still aggregate quietly."""
+    frame = _mixed_mode_frame().drop(columns="Mode")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert len(runner.aggregate(frame)) == 1
 
 
 def test_aggregate_reports_mean_and_sd():

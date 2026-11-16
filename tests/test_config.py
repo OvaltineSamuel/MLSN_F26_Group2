@@ -30,6 +30,11 @@ def test_approx_numbers_kept_separate():
 def test_paper_caveat_text():
     assert config.PAPER_CAVEAT
     assert "tenfold" in config.PAPER_CAVEAT
+    # The seed count belongs to the run, not to the constant: this text used to claim
+    # "averaged over 3 model-init seeds" even in 1-seed quick mode. benchmark.format_caveat
+    # appends the real number.
+    assert "3 model-init seeds" not in config.PAPER_CAVEAT
+    assert "3" not in config.PAPER_CAVEAT
 
 
 def test_raw_xlsx_url_exact():

@@ -37,7 +37,17 @@ import pytest
 nbformat = pytest.importorskip("nbformat")
 
 ROOT = Path(__file__).resolve().parents[1]
+#: The notebook under contract: the clean, unexecuted copy the team edits and runs.
 NB = ROOT / "notebooks" / "crispr_deephf_pipeline.ipynb"
+#: Where an **executed** copy goes, outputs and all, after a ``MODE = "full"`` run.
+#:
+#: Two tests here would otherwise turn CI red the moment that copy is committed:
+#: :func:`test_notebook_is_valid_and_has_no_outputs` (an executed notebook is nothing but
+#: outputs) and :func:`test_run_switch_defaults_are_safe` (which forbids ``MODE = "full"``
+#: in any code cell -- the reported run requires it). Both read :data:`NB` only, so the
+#: results commit lands under this directory and is not held to the shipping defaults.
+#: The convention is documented in the README so it is not folklore.
+EXECUTED_DIR = ROOT / "notebooks" / "executed"
 SRC = ROOT / "src" / "crispr_deephf"
 
 #: Package modules the notebook is allowed to call, checked against their real signatures.
@@ -57,6 +67,9 @@ PACKAGE_MODULES = (
 #: Run switches and the mode selector the settings cell must expose.
 REQUIRED_SWITCHES = ("MODE", "RUN_TIER1", "RUN_TIER2", "RUN_TIER3", "RUN_EXTRAS", "RUN_TUNING")
 
+#: The teammates' own notebooks, kept byte-for-byte as they wrote them, outputs and all.
+_TEAMMATE_NOTEBOOKS = frozenset({"BiLSTM.ipynb", "CNN_Train.ipynb"})
+
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -71,6 +84,28 @@ def _code_cells(nb) -> list:
 
 def _all_source(nb) -> str:
     return "\n".join(c.source for c in nb.cells)
+
+
+def _notebook_assignments(nb) -> dict[str, object]:
+    """Every literal top-level ``NAME = <literal>`` in the code cells, later cells winning.
+
+    Substring checks on the cell text cannot tell an assignment from the same words inside a
+    printed message, which is exactly where ``RUN_TIER3 = True`` now appears (in the
+    ViennaRNA warning), so the switches are read from the AST instead.
+    """
+    out: dict[str, object] = {}
+    for cell in _code_cells(nb):
+        for node in ast.parse(cell.source).body:
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+            ):
+                try:
+                    out[node.targets[0].id] = ast.literal_eval(node.value)
+                except ValueError:
+                    continue  # not a literal (a call, a comprehension, ...)
+    return out
 
 
 def _module_calls(nb):
@@ -91,10 +126,35 @@ def _module_calls(nb):
 # The four contract tests from the task brief
 # --------------------------------------------------------------------------- #
 def test_notebook_is_valid_and_has_no_outputs():
+    """Scoped to the unexecuted contract notebook; see :data:`EXECUTED_DIR`."""
+    assert EXECUTED_DIR not in NB.parents, "the contract notebook is the unexecuted one"
     nb = _nb()
     nbformat.validate(nb)
     assert all(not c.get("outputs") for c in nb.cells if c.cell_type == "code")
     assert all(c.get("execution_count") is None for c in _code_cells(nb))
+
+
+def test_the_executed_copy_has_a_home_of_its_own_and_is_documented():
+    """The follow-up commit of the executed notebook must not be able to fail CI.
+
+    Decided up front rather than discovered when the results commit goes red: the executed
+    copy lives in ``notebooks/executed/``, the two defaults-and-outputs contracts above read
+    only :data:`NB`, and the README states the convention. Any executed notebook found
+    *outside* that directory is the mistake this test exists to catch.
+    """
+    assert "notebooks/executed/" in (ROOT / "README.md").read_text(encoding="utf-8"), (
+        "the executed-notebook convention must be documented in the README"
+    )
+    strays = []
+    for path in (ROOT / "notebooks").glob("*.ipynb"):
+        if path == NB or path.name in _TEAMMATE_NOTEBOOKS:
+            continue
+        nb = nbformat.read(path, as_version=4)
+        if any(c.get("outputs") for c in nb.cells if c.cell_type == "code"):
+            strays.append(path.name)
+    assert strays == [], (
+        f"executed notebooks belong in notebooks/executed/, not beside the pipeline: {strays}"
+    )
 
 
 def test_setup_cell_has_colab_active_and_local_commented():
@@ -170,7 +230,18 @@ def test_setup_cell_warns_on_a_runtime_mismatch():
 
 
 def test_run_switch_defaults_are_safe():
-    """The shipped defaults must not start hours of GPU training on the first `Run all`."""
+    """The shipped defaults must not start hours of GPU work on the first `Run all`.
+
+    Scoped to the unexecuted contract notebook (:data:`NB`) on purpose -- see
+    :data:`EXECUTED_DIR`: the executed copy of a ``MODE = "full"`` run lands under
+    ``notebooks/executed/`` and is not held to this.
+
+    ``MODE`` and ``RUN_TUNING`` were not the whole cost. ``RUN_TIER3`` / ``RUN_EXTRAS``
+    shipped ``True``, and quick mode does not make them cheap: ``run_deep_model`` folds the
+    enzyme's **full** row set whatever ``MODE`` says, so a quick Tier-3 + extras run folded
+    230,961 sequences (~2.5 h at the measured 38.7 ms/guide) before the first reported epoch
+    -- in a notebook that tells the reader quick mode "runs end to end in minutes".
+    """
     code = "\n".join(c.source for c in _code_cells(_nb()))
     assert 'MODE = "quick"' in code, (
         'MODE must ship as "quick" (3 epochs, 1 seed); flipping to "full" is a deliberate edit'
@@ -178,8 +249,48 @@ def test_run_switch_defaults_are_safe():
     assert 'MODE = "full"' not in code, (
         'no code cell may set MODE = "full"; the markdown tells the reader to change it'
     )
-    assert "RUN_TUNING = False" in code
-    assert "FORCE_RERUN = False" in code
+    # Read the assignments themselves: the strings "RUN_TIER3 = True" and the like also
+    # occur inside the cells' own printed warning messages.
+    assigned = _notebook_assignments(_nb())
+    assert assigned["MODE"] == "quick"
+    for switch in ("RUN_TIER3", "RUN_EXTRAS", "RUN_TUNING", "FORCE_RERUN"):
+        assert assigned[switch] is False, (
+            f"{switch} must ship as False: it costs hours before any reported number"
+        )
+    # Tier 1 and Tier 2 are sequence-only and cheap even in full mode, so they stay on.
+    assert assigned["RUN_TIER1"] is True and assigned["RUN_TIER2"] is True
+
+
+def test_the_tiers_that_need_bio_features_are_gated_on_viennarna():
+    """Cell 21 computes ``VIENNA_AVAILABLE``; the tiers that cannot run without it must read it.
+
+    Every Tier-3 and extras model takes the bio branch, so a failed ``[deep]`` install should
+    skip them with one clear line rather than fail per model deep inside a run.
+    """
+    code = "\n".join(c.source for c in _code_cells(_nb()))
+    for switch in ("RUN_TIER3", "RUN_EXTRAS"):
+        assert f"if {switch} and bio_features.VIENNA_AVAILABLE:" in code, (
+            f"{switch} must also require bio_features.VIENNA_AVAILABLE"
+        )
+    assert code.count("if RUN_EXTRAS and bio_features.VIENNA_AVAILABLE:") >= 2, (
+        "both the single-target extras and the multi-task model need the gate"
+    )
+
+
+def test_colab_block_clones_this_branch_and_warns_on_a_stale_clone():
+    """A bare ``git clone <url>`` takes the default branch, which pre-merge is ``main``.
+
+    ``main`` has no ``crispr_deephf`` package, so a reader who clicks the README badge before
+    this branch merges would get a ModuleNotFoundError with no hint that the branch was why.
+    """
+    src = _nb().cells[1].source
+    assert "REPO_BRANCH" in src
+    assert '"clone", "-b", REPO_BRANCH' in src, "the clone must name the branch explicitly"
+    pull = src.split("if REPO_DIR.exists():")[1].split("else:")[0]
+    assert "returncode" in pull and "warnings.warn" in pull, (
+        "a failed `git pull --ff-only` leaves stale code behind and must say so, not pass "
+        "in silence"
+    )
 
 
 def test_required_sections_are_all_present():
@@ -206,12 +317,29 @@ def test_required_sections_are_all_present():
 # --------------------------------------------------------------------------- #
 def test_caveat_and_selection_note_are_printed_unconditionally():
     code = "\n".join(c.source for c in _code_cells(_nb()))
-    assert "benchmark.format_caveat()" in code
+    assert "benchmark.format_caveat(" in code
     assert "benchmark.format_selection_note(" in code
     assert ".attrs" not in code, (
         "pandas attrs do not survive every operation; print "
         "benchmark.format_selection_note(...) directly instead"
     )
+
+
+def test_the_caveat_is_told_how_many_seeds_this_run_has():
+    """``config.PAPER_CAVEAT`` no longer claims a seed count, so the notebook must supply it.
+
+    It used to read "averaged over 3 model-init seeds" whatever ran -- a method quick mode
+    never used, printed right beside a table whose s.d. column said ``n/a``.
+    """
+    code = "\n".join(c.source for c in _code_cells(_nb()))
+    assert "N_SEEDS_THIS_RUN" in code
+    assert 'results_long["Seed"].nunique()' in code, (
+        "the seed count must be counted from the results on disk, not written by hand"
+    )
+    assert "benchmark.format_caveat()" not in code, (
+        "every printed caveat must pass the real seed count: format_caveat(N_SEEDS_THIS_RUN)"
+    )
+    assert code.count("benchmark.format_caveat(N_SEEDS_THIS_RUN)") >= 3
 
 
 def test_paper_guide_counts_are_shown_beside_ours():
@@ -261,13 +389,40 @@ def test_multitask_model_is_the_only_multi_output_run():
 # --------------------------------------------------------------------------- #
 # Every package call matches the real signature
 # --------------------------------------------------------------------------- #
+def _imported_package_aliases(nb) -> set[str]:
+    """Names actually bound by an import of ``crispr_deephf`` in the notebook's code cells.
+
+    Handles ``from crispr_deephf import runner [as r]`` and ``import crispr_deephf.runner
+    [as r]``, including the parenthesised multi-line form the setup cell uses.
+    """
+    out: set[str] = set()
+    for cell in _code_cells(nb):
+        for node in ast.walk(ast.parse(cell.source)):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+                "crispr_deephf"
+            ):
+                out |= {alias.asname or alias.name for alias in node.names}
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.split(".")[0] == "crispr_deephf":
+                        out.add(alias.asname or alias.name.split(".")[-1])
+    return out
+
+
 def test_package_module_aliases_are_imported():
+    """Every ``mod.attr(...)`` call must have a real import behind it.
+
+    The old version of this test derived both sides from the notebook's own source (it asked
+    only whether the alias appeared somewhere in the text, which it had to, being the thing
+    that was just read out of it), so it could not fail. This parses the import *statements*
+    and compares the two sets.
+    """
     nb = _nb()
     used = {mod for mod, _, _, _ in _module_calls(nb)}
-    code = "\n".join(c.source for c in _code_cells(nb))
-    for mod in sorted(used):
-        assert "crispr_deephf import" in code or f"crispr_deephf.{mod}" in code
-        assert mod in code
+    imported = _imported_package_aliases(nb)
+    assert used, "no package calls found at all; the alias map or the walker is broken"
+    assert "runner" in imported, "the import parser found no package imports"
+    assert used <= imported, f"called but never imported: {sorted(used - imported)}"
 
 
 def _module_bindings(name: str) -> dict[str, ast.AST]:
